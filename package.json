@@ -1,0 +1,13 @@
+{
+  "name": "ai-infra-interviewer",
+  "version": "1.0.0",
+  "description": "AI Infra 面试官模式 Web 应用（LLM 方向：分布式训练 + 推理引擎 + RL 系统 + GPU/通信底层）",
+  "type": "module",
+  "scripts": {
+    "start": "node server.mjs",
+    "test": "node --test tests/engine.test.mjs"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
