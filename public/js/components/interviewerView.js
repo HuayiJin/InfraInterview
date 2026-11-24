@@ -202,7 +202,7 @@ export function renderInterviewerView(container, ctx) {
             <textarea
               class="answer-paste-textarea"
               id="iv-cand-answer"
-              placeholder="在这里粘贴候选人的回答 / 会议实时字幕 / 口述要点速记…&#10;例如：先说显存 70B 16Ψ=1120GB，HSDP 64路放得下所以不想开TP=8；GBS=4M/8K=512序列所以最小TP=2 DP=512；但通信字节数漏乘了2字节…"
+              placeholder="在这里粘贴候选人的回答 / 会议实时字幕 / 口述要点速记…&#10;例如，4,194,304 tokens 按 8,192 分成 512 条序列。候选人给出 TP=2、DP=512，已算静态分片显存，还需补充 AllGather 和激活峰值。"
             >${escapeHtml(record.candidateAnswer || '')}</textarea>
 
             <div class="answer-paste-footer">

@@ -17,7 +17,7 @@
 3. **28 道全栈均衡 AI Infra 题库（P6 / P7 / P8 分层）**
    - **分布式训练 (8 题)**：3D/5D 并行、ZeRO/FSDP2、MoE EP & DualPipe/DeepEP、FP8 细粒度训练、128K+ Context Parallelism、万卡容错与异步 Checkpoint、Zero-Bubble 流水线、千卡 MFU 定量估算。
    - **推理加速与引擎 (8 题)**：vLLM PagedAttention & Chunked Prefill、PD 分离与 KV 传输、MHA/GQA/MLA 矩阵吸收 & RadixAttention、Roofline 定量推导、W4A16/FP8/KV 量化、投机采样 EAGLE/MTP、DeepSeek-R1 Wide-EP & TBO、线上 SLO 排障。
-   - **RL / 后训练系统 (7 题)**：PPO vs GRPO vs DPO、veRL Colocated vs OpenRLHF Disaggregated、Weight Sync & 3D Resharding、长 CoT Rollout 长尾 Straggler、CUDA VMM/CuMem Sleep Mode、Agentic RL 沙箱集群、Train-Inference Precision Mismatch 排障。
+   - **RL / 后训练系统 (7 题)**：PPO vs GRPO vs DPO、Rollout 与训练的共置/分池及同步/异步更新（veRL、OpenRLHF）、Weight Sync & 3D Resharding、长 CoT Rollout 长尾 Straggler、CUDA VMM/CuMem Sleep Mode、Agentic RL 沙箱集群、Train-Inference Precision Mismatch 排障。
    - **GPU 算子与通信 (5 题)**：FlashAttention-1/2/3、NCCL Ring/Tree & Rail-Optimized/RoCEv2、CUDA/Nsight/Triton 调优、A100→GB200 NVL72 代际演进、Chunked Linear Cross-Entropy (Liger-Kernel)。
    - 支持自定义新建团队独家面试题。
 

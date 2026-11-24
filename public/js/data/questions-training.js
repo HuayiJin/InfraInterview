@@ -8,88 +8,79 @@ export const TRAINING_QUESTIONS = [
     incident: false,
     tags: ['TP/PP/DP/CP/EP', 'Megatron-LM', 'NVLink vs IB', '通信量推导'],
     summary: '在千卡 H100 集群上预训练 70B Dense / 671B MoE 模型，如何选择 TP/PP/DP/CP/EP 拓扑并定量推导通信开销？',
-    contextSpecs: ['1024×H100 80G', '8×GPU NVLink 900GB/s', '8×400Gbps IB', 'SeqLen 8K~128K'],
-    prompt: '假设现在要在 1024 张 H100 (80GB, 单机 8 卡 NVLink 900GB/s 双向，机间 8×400Gb/s InfiniBand) 上从零预训练一个 70B Dense LLM（80 层, H=8192, GQA 64Q/8KV；8K 上下文 GBS=4M tokens，后续扩到 128K）。请你从显存与 GBS 约束出发，给出合理的并行切分方案（FSDP/HSDP vs TP/PP/VPP/CP），说明为什么“显存放得下时应尽量克制 TP/PP/VPP”，并定量估算各维度通信原语与通信字节量。',
+    contextSpecs: ['1024×H100 SXM 80 GB', '每 GPU NVLink 900 GB/s 双向聚合', '每节点 8×400 Gb/s IB', 'GBS=4,194,304 tokens'],
+    prompt: '在 1024 张 H100 SXM 80 GB（每机 8 卡，机间每机 8×400 Gb/s）上训练 70B Dense 模型，80 层、H=8192、64 个 Q head 和 8 个 KV head。每步固定 4,194,304 tokens，等长序列从 8,192 扩到 131,072。给出两阶段各一组可行的 TP/PP/DP/CP，解释显存、GBS、通信和流水线气泡之间的取舍，再说明换成 MoE 后怎样安排 EP。',
     rubric: [
       {
         id: 'minimize-tp-pp',
-        label: '第一性原则：显存放得下且 GBS 允许时，优先 DP/FSDP2(HSDP)，尽量最小化 TP、能不开 PP/VPP 就不开（避免关键路径通信、GEMM 变窄与气泡）',
+        label: '结合显存峰值、FSDP 参数通信和 TP/PP 开销比较可行方案，允许不同拓扑',
         weight: 24,
         keywords: ['显存', '放得下', 'fsdp', 'hsdp', 'tp=1', 'tp=2', 'tp=4', '不开pp', 'pp=1', '关键路径', 'gemm', '小矩阵', '最小化', '克制'],
-        probe: '70B 在 1024 卡 H100 上用 FSDP2/HSDP 分片后静态显存并不大，为什么很多资深工程师反对一上来就盲目开 TP=8 或 PP=4/8 + VPP？',
+        probe: '如何在同一 GBS 下比较 HSDP 参数 AllGather、机内 TP 和跨机 PP 的成本？',
       },
       {
         id: 'gbs-tp-nvlink',
-        label: '结合 GBS=4M (8K 仅 512 序列) 约束推导并行度（DP≤512 ⇒ 至少需 TP/CP=2），且 TP 严控在机内 NVLink (TP≤8) 并配 SP',
+        label: '8K 时每步 512 条序列，mbs=1 时 DP≤512，TP×PP×CP 至少为 2，结合拓扑选择 TP/SP',
         weight: 20,
         keywords: ['gbs', '512', 'nvlink', '机内', 'sp', 'sequence parallel', 'allgather', 'reducescatter', 'allreduce', '张量并行'],
-        probe: 'GBS=4M tokens、seq=8K 时单步只有 512 条序列，1024 卡纯 DP 跑不满。此时选 TP=2/4 还是 PP=2？如果开了 TP+SP，通信原语怎么变？',
+        probe: '每步 512 条序列如何限制 DP？在满足总卡数的几种 TP/PP/CP 组合中怎样选择？TP+SP 的通信是什么？',
       },
       {
         id: 'pp-vpp-tradeoff',
-        label: 'PP / Interleaved VPP 适用边界：仅当显存/通信域受限时才引入 PP；VPP 需满足层数整除 (p·v | L) 且权衡 v× P2P 通信与气泡 (p-1)/(v·m+p-1)',
+        label: '对比 1F1B 和 Interleaved VPP 的理想气泡率、阶段边界数、层数与调度约束',
         weight: 18,
         keywords: ['pp', '流水线', 'p2p', 'bubble', '气泡', '1f1b', 'interleaved', 'vpp', '整除', 'micro-batch', 'stage'],
-        probe: '什么情况下才真的需要引入 PP 和 Interleaved VPP？VPP 降低气泡的同时付出了什么通信、显存和层数整除约束？',
+        probe: '在均匀切层和自定义切层两种实现里，VPP 分别要满足哪些约束？',
       },
       {
         id: 'cp-long',
-        label: '扩到 128K 长上下文时：单步序列数骤降 16× (仅 32 条) 且激活暴涨，必须切出 CP=8~16 (机内 Ulysses 对齐 8 KV Head + 跨机 Ring)',
+        label: '128K 时每步 32 条序列，DP≤32。给出卡数乘积、激活和本地 head 切分都成立的方案',
         weight: 20,
         keywords: ['cp', 'context parallel', 'ring attention', 'ulysses', '128k', '长上下文', '长文本', '激活显存', 'activation', '32'],
-        probe: '上下文扩到 128K、GBS 还是 4M 时，单步只剩 32 条序列了！为什么此时不仅激活会爆，DP 也直接被锁死 ≤32，怎么靠 CP 破局？',
+        probe: '每步 32 条长序列如何限制 DP？比较切分序列、参数和流水阶段对激活峰值与步时的影响。',
       },
       {
         id: 'quant-math',
-        label: '通信量精确估算（区分元素与 BF16 字节）：TP+SP 每层前向 8(T-1)/T·BSH 字节；ZeRO-1 每步 4Ψ 字节；Ring CP 前向 4(P-1)/P·S·H_kv 字节',
+        label: '通信量注明单 rank 发送口径、精度、组大小，以及 TP/PP 分片后的本地参数量',
         weight: 18,
         keywords: ['bsh', '8bsh', '4bsh', '2(n-1)', 'bytes', '字节', '带宽', '公式', '估算', '通信量', '4ψ', '2ψ'],
         probe: '请按 BF16 (2字节) 精确算一下：开启 TP+SP 后，单层 Transformer Block 前向+反向（不含重算）每卡总通信字节数是多少个 B·S·H？',
       },
     ],
     hints: [
-      'L1 第一性原则：能用 DP/FSDP2(HSDP) 扩展就别急着切 TP 和 PP——TP 通信卡在每层关键路径且切窄 GEMM；PP 有气泡，VPP 还会把 P2P 通信放大 v 倍。',
-      'L2 定量边界：70B 静态显存 16Ψ=1120GB，在 HSDP (如 64 路分片) 下每卡仅 17.5GB，80GB 轻松放得下；但 GBS=4M/8K=512 序列 ⇒ DP≤512，故 1024 卡只需 TP=2 (或 TP=4 省重算) × PP=1 × DP=512 (HSDP)！',
-      'L3 精确字节账（BF16=2B）：TP+SP 每子层 AG+RS = 2(T-1)/T·BSH 元素 = 4(T-1)/T·BSH 字节，每层 2 子层（Attn+MLP）故前向 8(T-1)/T·BSH 字节，反向同为 8(T-1)/T·BSH 字节。',
+      'L1 先列卡数恒等式和每步序列数，再比较 FSDP 通信、机内 TP 的 GEMM 形状与 PP 的空闲时间。',
+      'L2 8K、mbs=1、TP=2、PP=CP=1 时，DP=512，每个 DP rank 处理 1 个 micro-batch。HSDP 的分片维度在 DP 内。',
+      'L3 BF16 的 TP+SP 中，每子层前向有一次 AllGather 和一次 ReduceScatter。按每 rank 单向发送计，先算一个子层，再计 Attention 和 MLP。',
     ],
     followUps: [
       {
         stage: 'deepen',
-        question: '追问 1（气泡与层数整除反证）：如果某团队套用传统 Megatron 配法，在 1024 卡上对 80 层 70B 模型设了 TP=4、PP=8、DP=32（GBS=4M, seq=8K, mbs=1）。请你算一下每 DP 组的 micro-batch 数 m、标准 1F1B 气泡率，以及如果开 Interleaved VPP，`VPP=4` 合法吗？这如何反证 70B 应尽量不开大 PP？',
+        question: '追问 1（流水线气泡）　在 8K 阶段取 TP=4、PP=8、DP=32、mbs=1。算出每个 DP 副本的 micro-batch 数和标准 1F1B 气泡率。若各虚拟阶段层数相同，80 层允许 VPP=4 吗？',
       },
       {
         stage: 'corner',
-        question: '追问 2（架构演进）：如果把 70B Dense 换成 671B MoE（类似 DeepSeek-V3，256 个路由专家，每次激活 8 个），并行策略会怎么重构？为什么 MoE 训练更要把 TP 压到 1，而把机内 NVLink 留给 EP？',
+        question: '追问 2（MoE）　换成 256 个路由专家、Top-8 的 671B MoE 后，Attention 和专家层各自如何分组？哪些实测条件支持 TP=1？',
       },
     ],
-    referenceAnswer: `### Staff 级参考架构方案
+    referenceAnswer: `### 从每步样本数确定可行拓扑
 
-#### 1. 核心第一性原则：显存放得下时，尽量最小化 TP、PP 与 VPP
-- **为什么不要无脑开大 TP（如直接 TP=8）？** TP 通信位于每一层前/反向的**同步关键路径**上，即便在机内 NVLink (450 GB/s 单向) 上也难以 100% 掩盖，且 TP=8 会把 GEMM 维度切窄（如 \`H=8192 → 1024\`），明显拉低 Tensor Core 算力效率。因此 **TP 只需开到满足显存与 GBS 约束的最小值（如 TP=1/2/4）**，并严格限制在机内 NVLink 域内。
-- **为什么不要无脑开 PP / VPP？** PP 会引入流水线气泡 \`(p-1)/(m+p-1)\` 和首尾 Stage（Embedding / LM Head）不均衡；VPP (Interleaved 1F1B) 虽然压低气泡，但会令 P2P 通信量放大 \`v\` 倍、略增激活峰值，且要求模型层数能被 \`p × v\` 整除。**只要 FSDP2/HSDP + 轻量 TP 能装下显存且跑满 GBS，优先 \`PP=1\` 零气泡！**
+等长无填充，设每个 DP 副本每次处理 b 条序列、累积 m 次。每步 token 数 = DP × b × m × S，物理卡数 = TP × PP × CP × DP。8K 时每步 512 条，128K 时只有 32 条。HSDP 的分片和复制都在这个 DP 维度内。
 
-#### 2. 70B Dense (80 层) 在 1024×H100 (80GB) 上的真实配比推导
-- **8K 阶段（GBS = 4M tokens ⇒ 单步仅 512 条序列）**：
-  - **显存账**：静态显存 \`16Ψ = 1120 GB\`。若采用 **FSDP2 / HSDP**（如 64 路分片 × 16 路跨组 DDP），单卡静态显存仅 \`17.5 GB\`，配合 Selective/Full Checkpointing（Full AC 8K \`mbs=1\` 仅 ~\`11 GB\`）总显存 ~\`40 GB\`，**显存远未到需要 TP=8 × PP=4 的程度！**
-  - **GBS 约束**：单步只有 512 条序列，1024 张卡上 \`DP\` 上限被锁死在 \`512\`（\`mbs=1\`），因此至少需 \`TP × PP × CP ≥ 2\`。
-  - **推荐方案 A（FSDP2/HSDP 路线，最优零气泡）**：**\`TP=2 × PP=1 × DP=512 (HSDP: 64-way Shard × 8-way Replicate)\`**，或为了免去大部分重算（提升 MFU）略增至 **\`TP=4 × PP=1 × DP=256\`**（此时每 DP 组有 2 个 micro-batch 顺便摊薄通信）。
-  - **推荐方案 B（纯 Megatron + Distributed Optimizer / ZeRO-1，不做参数分片）**：权重+梯度共 \`4Ψ = 280 GB\`，需靠模型并行切到单卡 ~\`17.5~35 GB\`，此时仍优先较小组合如 **\`TP=4 × PP=2 (或 PP=4) × DP=128 (或 64)\`**，仅在气泡显著时再谨慎开启 VPP。
-- **128K 扩长阶段（GBS = 4M tokens ⇒ 单步骤降至仅 32 条序列！）**：
-  - 单条激活暴涨 16× 且 \`DP\` 上限跌至 \`≤ 32\`，必须拆出 **\`CP=8~16\`**（例如机内 \`Ulysses=8\` 精确对齐 8 个 KV Head + 跨机 \`Ring=2\` 走 Zig-Zag 均衡 Causal 计算），组合如 **\`TP=2~4 × CP=16 × PP=1~2 × DP=16~32\`**（配 FSDP2/HSDP）。
+- **8K 示例**。取 TP=2、PP=CP=1、DP=512，b=m=1。以 BF16 权重和梯度、FP32 主权重和 Adam 两个矩共 16 字节/参数估算，若 DP 内 64 路全分片、8 路复制，每卡常驻模型状态约 70×10⁹×16/(2×64) = **8.75 GB**。还要为层级 AllGather、激活、预取和工作区留空间。64 路分片跨机，要和较小分片组或更高机内 TP 的步时、峰值显存对照。
+- **128K 示例**。取 TP=2、CP=16、PP=1、DP=32，b=m=1。标准 head 切分后每个 TP rank 有 4 个 KV head。若后端支持混合 CP，同机 8 卡可排 TP=2 × Ulysses=4，再用 Ring=4 跨机。也可用纯 Ring。算例约束是 TP×PP×CP 至少为 32，CP 的最优值取决于本地激活和链路。
+- **PP 反例**。8K 取 TP=4、PP=8、DP=32，则 m=16。均衡阶段、忽略 P2P 时，1F1B 的空闲时间占总时间 7/23 = 30.4%。等层切分要求 8v 整除 80，v=4 不满足，v=2 时理想占比 7/39 = 17.9%。自定义不等长布局须按最慢阶段重算。VPP 增加跨阶段消息，显存紧或 FSDP 跨机传参过重时，PP 仍有价值。
 
-#### 3. 各维度通信原语与精确字节量（明确区分元素 vs BF16=2B）
-| 维度 | 通信原语 | 单层/单步每卡通信量（BF16 = 2 字节） | Overlap 方式 |
-|---|---|---|---|
-| **TP + SP** | 每子层 1×AG + 1×RS | 每层 2 子层（Attn+MLP），前向 \`4(T-1)/T · BSH\` 元素 = **\`8(T-1)/T · BSH\` 字节**；反向不含重算同为 \`8(T-1)/T · BSH\` 字节 | Async TP / GEMM-Comm Overlap |
-| **PP** | P2P Send/Recv | 每 Stage 边界 **\`2 · mbs · S · H\` 字节** | 1F1B 流水隐藏 P2P 延迟 |
-| **DP (ZeRO-1)** | RS(Grad) + AG(Param) | 每步全量 \`2(D-1)/D · Ψ\` 元素 ≈ **\`4Ψ\` 字节**（与 micro-batch 数无关） | Bucket 化与反向逐层 Overlap |
-| **CP (Ring)** | P2P 环形传递 KV | 每卡传 \`P-1\` 步 \`S/P\` 块 KV，前向共 **\`4(P-1)/P · S · H_kv\` 字节**（反向再加 dKV） | FlashAttention 掩盖下一块 KV 传输 |
+### 每 rank 发送字节数
 
-#### 4. 追问 1 精确验算（为什么 \`PP=8\` 在此场景很亏？）
-- 若设为 \`TP=4, PP=8, DP=32\`（GBS=4M, seq=8K, mbs=1 ⇒ 总 512 序列）：每 DP 组仅分到 \`m = 512 / 32 = 16\` 个 micro-batch！
-- **标准 1F1B 气泡率**（按 \`PP=8, m=16\` 精确算）：气泡占比 \`(p-1)/(m+p-1) = 7/23 ≈ 30.4%\`（相对理想耗时多出 \`(p-1)/m = 7/16 = 43.8%\`）——**气泡极高！**
-- **Interleaved VPP 合法性与精确公式**：80 层模型要求 \`p × v\` 整除 80，因此 **\`VPP=4\` 根本除不尽 (\`8×4=32 ∤ 80\`)**！合法取值只有 \`VPP=2\`（每块 5 层，气泡占比 \`(p-1)/(v·m+p-1) = 7/39 ≈ 17.9%\`）或 \`VPP=5\`（每块 2 层，气泡占比 \`7/87 ≈ 8.0%\`，但 P2P 通信放大 5×）。这正反证了：**显存放得下时，能不开 PP 就别开 PP！**
-- **MoE 场景**：Attention 激活小而专家 FFN 通信重，把 TP 压到 \`TP=1\` 可消除 Attention 通信与小 GEMM 损耗，将整机 NVLink 留给 **EP All-to-All**，实现节点内 NVLink + 节点间 RDMA 两级路由（DeepEP）。`,
+以下采用 ring 账本，接收量另计，BF16 为 2 字节。S 为 TP 组内参与该运算的序列长度，H 为未做 TP 切分的隐藏维。
+- **TP+SP**。典型 Megatron 稠密层的 Attention 和 MLP 各做一次 AG 和一次 RS，前向每层发送 8(T−1)/T × bSH 字节。反向同量，不含重算。
+- **PP**。若边界传完整 BF16 隐状态，每 micro-batch 前向传 2bSH 字节，反向同量。若边界传序列分片，改用本地张量形状。
+- **DP**。设单个 TP/PP 分片有 Ψ_local 个参数，D 路 RS 梯度和 AG 更新权重且二者均为 BF16，每次同步发送 4(D−1)/D × Ψ_local 字节。归约精度和同步频率影响结果。
+- **Ring CP**。S 为整个 CP 组序列长度、Hkv 为本 TP rank 的 KV 宽度，朴素满环前向每层发送 4(C−1)/C × bS Hkv 字节。
+
+**MoE 追问**。按 attention 和专家分别画通信组。EP 可重用稠密层的 DP 设备维度。比较每专家 token 数、跨节点 dispatch/combine、dense 参数复制和激活峰值，再决定 TP 与 EP。DeepSeek-V3 在其训练拓扑上使用 TP=1。
+
+> 依据　Megatron-LM 并行训练论文（arXiv:2104.04473）及 DeepSeek-V3 Technical Report 第 3 节。`,
   },
   {
     id: 'tr-02',
@@ -101,13 +92,13 @@ export const TRAINING_QUESTIONS = [
     tags: ['ZeRO', 'FSDP2', '显存估算', 'Activation Checkpointing'],
     summary: '推导混合精度训练 16Ψ 显存构成，对比 ZeRO-1/2/3 通信量差异，并解释 FSDP2 相比 FSDP1 的核心改进。',
     contextSpecs: ['BF16 + FP32 AdamW', '7B / 70B 参数量 Ψ', 'ZeRO-1/2/3', 'PyTorch FSDP2 DTensor'],
-    prompt: '请完整拆解标准 BF16 混合精度 + AdamW 训练中静态显存为什么是 16Ψ 字节？ZeRO Stage 1/2/3 分别切分了什么、各自额外引入了多少通信量？以及实际工程中为什么 PyTorch FSDP2 用 DTensor 替代了 FSDP1 的 FlatParameter？',
+    prompt: '假设 BF16 权重、BF16 梯度、FP32 主权重和 FP32 Adam 一二阶矩均常驻。拆解每参数 16 字节的来源，并比较 ZeRO-1/2/3 在 D 个 DP rank 上的静态显存和一次前反向的通信。PyTorch FSDP2 的 per-parameter DTensor 改变了哪些分片、冻结和保存权重的操作？',
     rubric: [
       {
         id: 'mem-16psi',
         label: '准确拆解 16Ψ：BF16权重2Ψ + BF16梯度2Ψ + FP32主权重4Ψ + Adam一二阶矩8Ψ',
         weight: 25,
-        keywords: ['16', '2', '4', '8', 'adam', 'master', '主权重', '动量', '方差', 'momentum', 'variance', 'fp32', 'bf16'],
+        keywords: ['16ψ', 'bf16', 'fp32', 'adam', 'master weight', '主权重', '一阶矩', '二阶矩', '动量', '方差'],
         probe: '请逐项算一下 16Ψ 里的每一块分别是多少字节：参数、梯度、Master Weight、Momentum、Variance？',
       },
       {
@@ -115,18 +106,18 @@ export const TRAINING_QUESTIONS = [
         label: 'ZeRO-1(Opt) / ZeRO-2(Opt+Grad) / ZeRO-3(Opt+Grad+Param) 切分与内存公式',
         weight: 22,
         keywords: ['zero-1', 'zero1', 'zero-2', 'zero2', 'zero-3', 'zero3', '优化器', '梯度', '参数', 'sharding', '分片'],
-        probe: 'ZeRO-1 和 ZeRO-2 各自把单卡静态显存降到了多少？为什么 Megatron 默认只开 Distributed Optimizer (类 ZeRO-1) 而不常直接套 ZeRO-3？',
+        probe: '采用相同权重和梯度精度时，ZeRO-1/2 各节省哪些常驻状态？什么条件下愿意用参数 AllGather 再换显存？',
       },
       {
         id: 'comm-3psi',
-        label: '通信量对比：DP/ZeRO-1/2 为 2Ψ，ZeRO-3/FSDP 为 3Ψ（多 1× 前向/反向 AllGather）',
+        label: '区分一次前反向与整步。理想 Ring 下每 rank 发送量含 (D−1)/D，按通信 dtype 换算字节',
         weight: 20,
-        keywords: ['3', '2', 'allgather', 'reducescatter', 'allreduce', '通信量', '1.5倍', '50%', 'prefetch'],
-        probe: '从标准 DDP 到 ZeRO-3，通信总量增加了多少？这多出来的通信发生在大模型训练的哪个阶段？',
+        keywords: ['allgather', 'allreduce', 'reducescatter', 'reduce-scatter', 'all-gather', 'ring', '发送量', '权重重分片', '反向 ag', '6fψ', '4fψ'],
+        probe: '设一次前反向且前向后重分片，ZeRO-3 比 DDP 多传什么？若改变 reshard 策略或累积频率，通信会怎样变化？',
       },
       {
         id: 'fsdp2-dtensor',
-        label: 'FSDP2 per-parameter DTensor 分片：消除 FlatParam 碎片/支持混合精度与子模块灵活冻结',
+        label: 'FSDP2 的参数表示、通信分组、冻结参数和分片 state dict',
         weight: 18,
         keywords: ['fsdp2', 'dtensor', 'flatparameter', 'flatparam', 'per-parameter', 'dim-0', '碎片', 'lora', 'compile', 'torch.compile'],
         probe: 'FSDP1 把参数拼成一个大 FlatParameter 遇到了哪些工程痛点？FSDP2 改成 per-parameter DTensor 解决了什么？',
@@ -141,8 +132,8 @@ export const TRAINING_QUESTIONS = [
     ],
     hints: [
       'L1 方向提示：静态显存按 Parameter / Gradient / Optimizer State (含 FP32 Master Weights) 三大块来算。',
-      'L2 通信量提示：AllReduce = ReduceScatter (Ψ) + AllGather (Ψ) = 2Ψ；ZeRO-3 需要在前向和反向各 AllGather 一次参数，再 ReduceScatter 梯度，共 3Ψ。',
-      'L3 FSDP2 提示：FSDP1 将所有参数展平拼接成 1D FlatParameter，导致 LoRA/冻结参数、Checkpoint 转换、torch.compile 及显存碎片都很痛苦；FSDP2 按参数张量 dim-0 独立 DTensor 切分。',
+      'L2 一次前反向按每卡发送计，Ring 的 RS 或 AG 各是 (D−1)/D 个完整张量。参数重分片策略决定反向是否还需 AG。',
+      'L3 FSDP1 通常按包装单元展平。FSDP2 保留参数身份，多个参数仍可合并通信。',
     ],
     followUps: [
       {
@@ -154,37 +145,26 @@ export const TRAINING_QUESTIONS = [
         question: '追问 2（Hybrid Sharding）：在 64 节点（512 卡）集群用 FSDP2 训 32B 模型，全集群 512 路 ZeRO-3 通信效率很差，HSDP（Hybrid Sharded Data Parallel）是怎么组合域内与域间策略的？',
       },
     ],
-    referenceAnswer: `### Staff 级参考解析
+    referenceAnswer: `### 常驻状态和通信分别算
 
-#### 1. 静态显存 \`16Ψ\` 完整拆解（BF16 混合精度 + FP32 AdamW）
-- **BF16 参数权重**：\`2Ψ\`
-- **BF16 梯度**（若用 FP32 梯度累积则为 \`4Ψ\`，总量变 \`18Ψ\`）：\`2Ψ\`
-- **Optimizer States (FP32)**：
-  - FP32 Master Weight：\`4Ψ\`
-  - FP32 Momentum ($m_t$)：\`4Ψ\`
-  - FP32 Variance ($v_t$)：\`4Ψ\`
-  - 小计：\`12Ψ\`
-- **合计**：\`2Ψ + 2Ψ + 12Ψ = 16Ψ\`（70B 模型静态显存 ≈ \`1.12 TB\`）。
+设 Ψ 为一个 DP 副本中的参数个数，D 为分片数。题设包含权重 2Ψ、梯度 2Ψ、主权重 4Ψ、Adam 一阶矩和二阶矩各 4Ψ 字节，共 16Ψ。若梯度改存 FP32，合计为 18Ψ。不同优化器实现应按实际张量核算。
 
-#### 2. ZeRO-1 / 2 / 3 显存与通信量对比（数据并行度 $N_d$，显存单位：字节；通信量按元素数 / BF16 字节双标注）
-| 策略 | 单卡静态显存 (字节) | 通信总量（每步每卡） | 核心权衡 |
-|---|---|---|---|
-| **DDP** | \`16Ψ\` | \`2Ψ\` 元素 (\`4Ψ\` 字节, AllReduce 梯度) | 零参数通信，显存最高 |
-| **ZeRO-1** | \`4Ψ + 12Ψ/N_d\` | \`2Ψ\` 元素 (\`4Ψ\` 字节, RS 梯度 + AG 权重) | 几乎无额外通信，显存直降 ~4× |
-| **ZeRO-2** | \`2Ψ + 14Ψ/N_d\` | \`2Ψ\` 元素 (\`4Ψ\` 字节, 逐层 RS 梯度 + AG 权重) | 通信仍为 2Ψ 元素，适合中等规模 |
-| **ZeRO-3 / FSDP** | \`16Ψ/N_d\` | \`3Ψ\` 元素 (\`6Ψ\` 字节, 前向 AG + 反向 AG + 反向 RS) | 通信增 1.5×；Grad Accum 时每 micro-batch 都要 AG 参数！ |
+| 策略 | 每卡常驻字节 | 一次前反向、一次更新的每卡发送量 |
+|---|---|---|
+| DDP | 16Ψ | 梯度 AllReduce，4fΨ 字节 |
+| ZeRO-1 | 4Ψ + 12Ψ/D | RS 梯度、AG 更新后的权重，4fΨ |
+| ZeRO-2 | 2Ψ + 14Ψ/D | RS 梯度、AG 更新后的权重，4fΨ |
+| ZeRO-3 | 16Ψ/D | 前反向各 AG 一次权重，RS 一次梯度，6fΨ |
 
-> **Grad Accum 陷阱**：ZeRO-3 若每 micro-batch 都释放参数，GA=$k$ 时参数 AllGather 通信会被放大 $k$ 倍；可通过 \`reshard_after_forward=False\`（退化为类 ZeRO-2 保留参数）或 HSDP 局部分片缓解。
+f=(D−1)/D，以 Ring 每 rank 的发送量计，接收量相同。表中通信张量均为 BF16，ZeRO-3 在前向后重分片。全量参数临时展开、并发预取、激活和 optimizer 临时张量都可能造成峰值。可用逐阶段显存快照区分活跃张量与分配器碎片。
 
-#### 3. FSDP2 相比 FSDP1 的核心工程跃迁
-- **Per-Parameter DTensor (dim-0 sharding)** 替代 FSDP1 的 \`FlatParameter\`：
-  1. 彻底消除大块连续 FlatParam 带来的显存分配碎片和无谓拷贝；
-  2. 原生支持参数级 \`requires_grad\`（完美适配 LoRA/部分冻结）与不同参数不同精度；
-  3. 完美兼容 \`torch.compile\`（无 Graph Break）与 2D/3D 并行组合（TP+FSDP2+CP）；
-  4. 无通信直接异步保存分布式 Checkpoint（DCP）。
+### FSDP2、累积与跨节点
 
-#### 4. 追问要点
-- **HSDP (Hybrid Sharded Data Parallel)**：机内 8 卡（NVLink 域）做 \`FSDP/ZeRO-3\`，跨机 64 节点（IB 域）做 \`DDP/ZeRO-1\` 梯度同步，既吃满 NVLink 省显存，又避免跨机高频 AllGather 参数。`,
+- FSDP2 默认用沿 dim-0 分片的每参数 DTensor 表示模型，保留参数名和身份，便于分别冻结参数和处理分片 state dict。每次 fully_shard 调用决定一组参数的集合通信粒度，组太大可能抬高峰值。编译和 checkpoint 仍需按模型验证。
+- 累积 k 个 micro-batch 时，应逐次计 AG/RS。\`reshard_after_forward=False\` 可以省同一 micro-batch 反向前的 AG。PyTorch 2.9 的 \`set_reshard_after_backward(False)\` 可保留参数到下个 micro-batch，省去下一次前向 AG。是否延迟梯度同步另行设置。保留完整参数或梯度会增加峰值，关闭梯度同步本身不会取消参数 AG。
+- 512 卡 HSDP 示例可在机内 8 卡分片、64 台间复制同号分片。机内做参数 AG 和梯度 RS，跨机对相应梯度分片做 AllReduce。换来的代价是常驻状态按 8 路分摊，需核算 32B 模型的本地容量。
+
+> 依据　ZeRO（arXiv:1910.02054）及 PyTorch 2.9 的 fully_shard、FSDPModule 文档。`,
   },
   {
     id: 'tr-03',
@@ -194,7 +174,7 @@ export const TRAINING_QUESTIONS = [
     frequency: '高频必考',
     incident: false,
     tags: ['MoE', 'Expert Parallelism', 'All-to-All', 'DeepEP', 'DualPipe'],
-    summary: '针对 256 专家级细粒度 MoE 模型，剖析 EP All-to-All 瓶颈、Aux-loss-free 负载均衡以及计算-通信全重叠架构。',
+    summary: '以 DeepSeek-V3 为例，分析 Top-8 路由的跨机流量、热点专家及 DualPipe 可隐藏的通信。',
     contextSpecs: ['671B Total / 37B Active', '256 Experts, Top-8', 'EP64 + PP16', 'NVLink + InfiniBand'],
     prompt: '以 DeepSeek-V3 (671B 总参 / 37B 激活，256 路由专家 Top-8) 为例，在大规模跨机 Expert Parallelism (如 EP=64) 训练中，最核心的性能瓶颈和稳定性风险是什么？如何从算法-系统协同（路由限制、负载均衡）和底层通信（All-to-All 重叠）两个维度做到高 MFU 且不 Drop Token？',
     rubric: [
@@ -207,66 +187,57 @@ export const TRAINING_QUESTIONS = [
       },
       {
         id: 'node-limited',
-        label: 'Node-Limited Routing（节点受限路由，如最多路由到 M=4 个节点）利用 NVLink/IB 带宽比',
+        label: '节点受限路由控制跨机扇出，按目的节点去重后由机内互连分发',
         weight: 20,
-        keywords: ['node-limited', '节点限制', 'm=4', '机内', 'nvlink', '两级', 'hierarchy', '分组路由', '去重', 'dedup'],
-        probe: '一个 Token 选 8 个专家，如果均匀散落到 8 台不同机器上，IB 带宽直接打满。DeepSeek 是怎么通过路由约束把 IB 流量压下来的？',
+        keywords: ['node-limited', '节点受限', '目的节点', '跨 ib', '去重', '机内', 'nvlink', '两级', '层次', 'dedup'],
+        probe: 'Top-8 的逻辑分发次数、目的节点数和实际跨 IB 发送的激活份数有何区别？',
       },
       {
         id: 'aux-loss-free',
         label: '负载均衡与 Token Dropping：Aux-loss-free (动态 Bias 调节) 替代强辅助损失',
         weight: 20,
         keywords: ['负载', 'load balance', 'aux-loss', 'bias', '偏置', 'token drop', 'dropping', 'capacity', '热点', '倾斜'],
-        probe: '传统 GShard/Switch 用 Aux Loss 强迫负载均衡有什么副作用？Aux-loss-free 机制是怎么在不伤害模型精度的情况下解决专家倾斜和 Token Dropping 的？',
+        probe: '动态路由偏置怎样调整负载、怎样影响专家输出权重？剩余倾斜如何处理？',
       },
       {
         id: 'overlap-dualpipe',
-        label: '通信-计算完全重叠：DualPipe 双向流水线 / Micro-batch 重叠 + SM 切分 (DeepEP)',
+        label: 'DualPipe 的双向流水、跨 micro-batch 重叠与通信 SM 预算',
         weight: 22,
         keywords: ['dualpipe', 'deepep', 'overlap', '重叠', 'sm', '双向', 'attention', 'mlp', 'grouped gemm', '通信sm'],
         probe: '常规 1F1B 很难把跨机 All-to-All 完全藏在算子后面。DualPipe 和 DeepEP 是怎么把通信和计算（前向+反向）交错重叠起来的？',
       },
       {
         id: 'grouped-gemm',
-        label: '算子层优化：Permute/Unpermute 融合与 Grouped GEMM / FP8 稀疏计算',
+        label: '按专家重排 token，以 Grouped GEMM 处理变长的稠密矩阵乘法',
         weight: 16,
         keywords: ['grouped gemm', 'permute', 'padding', 'kernel', 'fp8', '稀疏', 'cutlass', '算子'],
         probe: 'Token Dispatch 到达目标 GPU 后，每个专家收到的 Token 数不相等，在 GPU 上怎么高效执行多专家矩阵乘？',
       },
     ],
     hints: [
-      'L1 方向提示：从三层拆解——(1) 算法路由约束减少跨机扇出；(2) 无辅助损失动态偏置消除热点；(3) 底层通信 Kernel 与双向流水线实现零暴露通信。',
-      'L2 带宽比提示：H800 NVLink (400GB/s) 与 IB (~50GB/s/卡) 带宽比约 3.2:1~8:1，若每个 Token 最多发往 M=4 个节点，机内再通过 NVLink 转发给多专家，可做到机间流量只发一份（去重）。',
-      'L3 重叠提示：DualPipe 让一个 Chunk 的前向 Attention/MLP 与另一个 Chunk 的反向 All-to-All 重叠，并把 GPU 的部分 SM (如 20/132 个 SM) 专用于 DeepEP 异步通信。',
+      'L1 分别画出 dispatch 和 combine，比较最忙 rank 的 token 数、IB 流量和专家计算。',
+      'L2 V3 限制一个 token 最多到 4 个节点。按目的节点去重后，每个远端节点各收一份激活，再做机内分发。',
+      'L3 跨 micro-batch 的计算要足够长，通信流和计算流之间也必须满足数据依赖，才能隐藏通信。',
     ],
     followUps: [
       {
         stage: 'deepen',
-        question: '追问 1（显存代价）：DualPipe 把流水线气泡压到极低且完美隐藏了 All-to-All，但它有一个明显的代价——模型权重需要存两份（因为双向同时从两端注入）。在 671B 模型上，这个显存代价是如何消化的？',
+        question: '追问 1（显存代价）　原版 DualPipe 需要两份参数。哪些参数由 EP/PP 分摊，哪些仍复制？如何估算可用的激活空间？',
       },
       {
         stage: 'corner',
         question: '追问 2（容错与动态扩缩）：如果训练中某张卡收到的动态 Token 数突然飙升导致临时激活 OOM（由于不 Drop Token），工程上应该如何防御？',
       },
     ],
-    referenceAnswer: `### Staff/Principal 级参考架构
+    referenceAnswer: `### 跟踪一个 token 的前向与反向
 
-#### 1. MoE EP 训练三大核心痛点
-1. **All-to-All 通信爆炸**：每个 Token Top-$K$ 路由（如 $K=8$），前向需 Dispatch + Combine 两次 All-to-All，反向再做两次，共 4 次；细粒度 MoE 激活计算量小，计算/通信比急剧恶化。
-2. **专家负载倾斜 (Straggler)**：热门专家计算超时且显存尖峰，强制 \`Capacity Factor\` 丢弃 Token 又损害模型收敛。
-3. **跨节点 IB 带宽远低于 NVLink**：裸 All-to-All 在 EP64 跨 8 节点时通信直接成为绝对瓶颈。
+Top-8 为每个 token 产生 8 条逻辑专家分配。前向 dispatch 将隐藏向量交给专家，combine 将输出按门权重加总。反向分别传送对应梯度，常见实现前反向各两次逻辑 All-to-All。物理流量要扣除本地路由并考虑分层传输。V3 限制最多 4 个目的节点，同一目的节点的多个专家可共享一份跨 IB 的输入，再经 NVLink 转发。
 
-#### 2. 算法-系统协同四大核心方案
-- **Node-Limited Routing（节点受限路由）**：限制每个 Token 选出的 Top-8 专家最多分布在 $M=4$ 个节点内。发送端按目标节点去重（每节点只通过 IB 发一次 Token），到达目标节点后再经由高带宽 NVLink 分发给该节点内的多个目标专家，精准匹配 NVLink / IB 带宽比。
-- **Aux-Loss-Free 负载均衡**：去掉干扰主 Loss 梯度的强辅助损失，为每个专家维护独立偏置项 $b_i$（仅影响路由选专家，不乘入权重门控值）：若某专家本步过载则 $b_i \leftarrow b_i - \gamma$，欠载则 $b_i \leftarrow b_i + \gamma$，实现几乎零 Token Dropping 与稳定收敛。
-- **DualPipe + DeepEP 极致计算通信重叠**：
-  - 将每层拆分为 \`Attention -> All-to-All Dispatch -> MoE MLP -> All-to-All Combine\`。
-  - DualPipe 从流水线两端双向注入 Micro-batch，使 Forward 的计算与 Backward 的 All-to-All 通信（反之亦然）在时间轴上精准交错。
-  - **DeepEP**：预留少量 GPU SM（如 H800 132 SM 中划出 20 SM）跑自定义 PTX/IBGDA 异步通信内核，其余 SM 满载跑计算，无同步 Stall。
-- **Grouped GEMM + FP8**：通过 Fusion Permute 将变长 Token 按专家重排，调用 CUTLASS/DeepGEMM 的 FP8 Masked/Grouped GEMM 避免为每个小专家单独 Launch Kernel。
+- **负载**。选专家时对原始分数加动态 bias，过载减、欠载增。组合专家结果使用原始亲和分数。V3 还保留了很小的序列级均衡辅助项。路由均衡改善长期分布，单个 micro-batch 仍可能集中在少数专家。
+- **算子与重叠**。按专家整理 token，用 Grouped GEMM 批量运行大小不同的稠密 FFN。DualPipe 交错不同 micro-batch 的前反向，让已就绪的计算覆盖 dispatch/combine。通信核占用部分 SM，还会与 GEMM 竞争内存带宽。用最慢 rank 的时间线和暴露在关键路径上的通信检验效果。
+- **容量与显存追问**。原版 DualPipe 保存两份参数，按各 stage 本地 dense/共享专家、EP 分片、优化器和在途激活分别预算。Dropless 路径按实际路由计数准备缓冲，对热点预留余量，必要时将同一批专家 token 分轮计算并按原路由合并。限制每专家容量后直接丢弃 token 会改变训练语义。
 
-#### 3. 追问要点
-- **DualPipe 权重翻倍**：结合高 DP 下的 **ZeRO-1 / Optimizer Sharding**，参数本身只占静态显存极小部分（FP8/BF16 参数经 EP64+PP16 分片后每卡仅几 GB），翻倍完全在 80GB 预算内；此外后来的 **DualPipeV (V-shape)** 通过单端折叠进一步消除了双份权重开销。`,
+> 依据　DeepSeek-V3 Technical Report（arXiv:2412.19437），第 2.1.2、3.2 节。`,
   },
   {
     id: 'tr-04',
@@ -276,13 +247,13 @@ export const TRAINING_QUESTIONS = [
     frequency: '高频',
     incident: false,
     tags: ['FP8', 'E4M3/E5M2', 'Blockwise Quant', 'Loss Spike', 'Hopper'],
-    summary: '解析 FP8 E4M3 vs E5M2 数值特性、Per-Tensor Delayed Scaling 的缺陷，以及细粒度 Tile/Block-wise FP8 训练如何消除溢出。',
-    contextSpecs: ['H100 FP8 1979 TFLOPS', 'E4M3 / E5M2', '1×128 / 128×128 Scaling', 'WGRAD FP32 Accum'],
-    prompt: '在 H100/B200 上开启 FP8 训练可以把矩阵乘理论算力翻倍，但大规模 LLM 长期用 FP8 训练很容易出现精度退化甚至 Loss Spike。请分析 E4M3 与 E5M2 的区别、Transformer Engine 传统 Delayed Scaling 为什么会翻车，以及 Fine-grained (Tile/Block-wise) FP8 训练的关键工程设计。',
+    summary: '比较 FP8 格式、历史 amax 和当前块缩放，分析离群值、累加误差及 Loss Spike 的定位方法。',
+    contextSpecs: ['H100 SXM dense FP8 1,979 TFLOP/s', 'E4M3 / E5M2', '1×128 / 128×128 scaling', 'FP32 accumulation'],
+    prompt: '以 Hopper 上的 FP8 训练为例，解释 E4M3 和 E5M2 的表示范围，比较 per-tensor delayed scaling 与细粒度当前块缩放。若某个 batch 出现 Loss Spike，如何区分 scale、累加精度、模型敏感层和数据的影响？',
     rubric: [
       {
         id: 'fp8-format',
-        label: 'E4M3 (高精度、窄动态范围±448，用于前向激活/权重) vs E5M2 (宽动态范围±57344，用于梯度)',
+        label: 'E4M3/E5M2 的尾数与指数位、最大有限值和不同配方中的用途',
         weight: 22,
         keywords: ['e4m3', 'e5m2', '动态范围', '尾数', '指数', '448', '梯度', '前向', '激活'],
         probe: 'E4M3 和 E5M2 各自的指数位、尾数位以及适用张量类型是什么？为什么现在很多细粒度方案连梯度也统一用 E4M3？',
@@ -292,18 +263,18 @@ export const TRAINING_QUESTIONS = [
         label: 'Delayed Scaling (历史 Amax 窗口) 面对 Activation Outlier 突变导致的 Underflow/Overflow',
         weight: 22,
         keywords: ['delayed', 'amax', 'outlier', '离群值', '溢出', '下溢', 'overflow', 'underflow', 'per-tensor', 'transformer engine'],
-        probe: 'Transformer Engine 的 Per-Tensor Delayed Scaling 为什么在遇到激活离群值 (Outliers) 时容易造成大片小数值被截断成 0？',
+        probe: '历史 amax 偏大或偏小时分别有哪些风险？同一张量的不同通道共用 scale 会怎样影响舍入？',
       },
       {
         id: 'fine-grained',
-        label: '细粒度量化：激活 1×128 Tile-wise、权重 128×128 Block-wise 隔离离群值',
+        label: 'DeepSeek-V3 的激活 1×128 和权重 128×128 scale 粒度，以及每块的数值取舍',
         weight: 24,
-        keywords: ['1x128', '128x128', 'tile', 'block', '细粒度', 'fine-grained', '分组', 'group', 'online', '在线量化'],
-        probe: 'Block-wise / Tile-wise 量化是如何把 Outlier 影响局限在局部 128 个元素里的？为什么权重用 128×128 而激活是 1×128？',
+        keywords: ['1×128', '128×128', '1x128', '128x128', 'tile', 'block', '细粒度', '分块', '局部 scale', 'fine-grained', '分组'],
+        probe: '激活 1×128 和权重 128×128 分组的离群值影响范围各有多大？转置如何影响 scale 布局？',
       },
       {
         id: 'fp32-accum',
-        label: 'Hopper WGMMA 内部累加精度陷阱（约 14-bit 尾数）与 CUDA Core 高精度 FP32 晋升累加',
+        label: '区分 Hopper FP8 指令输出类型与长 K 内积的中间累加误差，解释分段 FP32 累加',
         weight: 18,
         keywords: ['累加', 'accum', 'wgmma', 'cuda core', 'fp32', '精度损失', 'tensor core', 'promotion', 'master'],
         probe: '你知道 Hopper Tensor Core 在执行 FP8 WGMMA 时的内部累加精度其实并不是完整的 FP32 吗？这在长内积维度 K 上会造成什么偏差，工程上怎么修？',
@@ -313,13 +284,13 @@ export const TRAINING_QUESTIONS = [
         label: '敏感模块保持 BF16/FP32：Embedding、LM Head、MoE Gate、LayerNorm、Attention Softmax',
         weight: 14,
         keywords: ['embedding', 'lm head', 'gate', 'router', 'norm', 'softmax', 'bf16', '敏感', '主权重'],
-        probe: '全模型都能转 FP8 吗？哪些算子和张量必须保留 BF16 或 FP32？',
+        probe: '哪些运算或状态对低精度敏感？如何验证适合的保留精度？',
       },
     ],
     hints: [
-      'L1 方向提示：从“数值表示 (E4M3/E5M2) -> 缩放粒度 (Per-Tensor vs Block-wise) -> 硬件累加精度 (WGMMA 14-bit 截断) -> 敏感层白名单”四层回答。',
-      'L2 细粒度原因：激活在 Channel 维存在剧烈离群值，按 1×128 分组后离群值只影响同一组 128 元素；权重按 128×128 分块刚好对齐 GEMM 的 Tile 维度，反向转置无需重算 Scale。',
-      'L3 Hopper 硬件彩蛋：Hopper FP8 WGMMA 累加器实际尾数对齐精度仅约 13~14 bit，DeepSeek-V3 每隔 $N_C=128$ 个元素（每 4 次 WGMMA）把中间结果拷贝到 CUDA Core 用完整 FP32 寄存器做二次累加。',
+      'L1 分别检查表示范围、scale 估计、累加和敏感算子。',
+      'L2 分块将离群值的影响局限在该块。转置与重分组时要检查量化方向。',
+      'L3 V3 在 H800 上观察到长 K 内积的累加误差，以 K=128 分段进行高精度累加。',
     ],
     followUps: [
       {
@@ -328,24 +299,19 @@ export const TRAINING_QUESTIONS = [
       },
       {
         stage: 'corner',
-        question: '追问 2（Blackwell 演进）：到 NVIDIA Blackwell (B200) 架构引入了硬件原生 MXFP8 / NVFP4 (Microscaling) 支持，这相比在 Hopper 上手写 CUDA Core 晋升累加带来了什么架构简化？',
+        question: '追问 2（Blackwell）　MXFP8 和 NVFP4 如何在硬件中处理块 scale？它们与 Hopper 上控制长内积累加误差解决的是同一个问题吗？',
       },
     ],
-    referenceAnswer: `### Staff 级参考解析
+    referenceAnswer: `### 表示、缩放和累加是三个独立选择
 
-#### 1. FP8 格式特性
-- **E4M3**：1 符号 + 4 指数 + 3 尾数，最大值 \`448\`，精度更高 → 适合前向权重与激活（在细粒度 Scaling 下梯度也可全用 E4M3）。
-- **E5M2**：1 符号 + 5 指数 + 2 尾数，最大值 \`57344\`，与 FP16 指数域一致 → 传统用于梯度以防溢出。
+E4M3 有 4 位指数、3 位尾数，常用有限值格式最大 448。E5M2 为 5 位指数、2 位尾数，最大 57,344。TE 的 HYBRID 配方常在前向用 E4M3、反向梯度用 E5M2。缩放粒度足够细时，也有梯度用 E4M3 的配方。
 
-#### 2. Per-Tensor Delayed Scaling 的核心缺陷
-- 整个大张量共享 1 个 FP32 Scale，一旦某个 Channel 出现 100× 级 **Activation Outlier**，Scale 被迫拉大，导致同张量里 99% 正常值发生 **Underflow 归零**；
-- Delayed Scaling 依赖过去 N 步历史 Amax 预测当前步，一旦单步梯度突增即发生溢出/饱和，触发 Loss Spike。
+- **缩放**。设反量化因子 s，量化为 FP8(x/s)。历史 amax 估得太小会使新峰值饱和，估得太大会让小量的有效精度下降乃至舍入为零。Per-tensor 控制影响范围，delayed/current 控制何时取得 amax，这两项应分别讨论。
+- **V3 的实现**。激活按 1×128，权重按 128×128 计算局部 scale。单个异常值仍影响同块元素。报告在 H800 的 FP8 GEMM 上观测到部分和仅保留约 14 位精度。其内核对长 K 的乘加分段，每 128 个元素将部分和提升到 CUDA Core 做 FP32 累加并处理 scale。可将输出同 BF16/FP32 基线逐层比较，观察误差随 K 的变化。
+- **遇到 Loss Spike**。在相同 checkpoint 和 batch 上比较 BF16 与 FP8 的首个异常层，记录 amax、scale、饱和/零值比例、grad norm。优先检查 router、归一化、softmax、输出层及优化器状态。逐项回到高精度可以区分缩放、累加、通信和数据问题。
+- **扩展追问**。通信可量化 dispatch 的激活，必须传 scale 或约定格式。梯度归约涉及跨 rank 求和，要单独选累加精度并验证收敛。Adam 矩的低精度存储也需独立验证。Blackwell 的 MXFP8 可在点积内使用每 32 个元素的块 scale。NVFP4 使用更细的 4-bit 格式和块缩放。原生块缩放减少软件处理，累加误差仍取决于实际指令、K 和数据。
 
-#### 3. 细粒度在线 FP8 训练方案（DeepSeek-V3 / 现代 SOTA）
-- **激活**：\`1 × 128\` Tile-wise 在线计算当前块的 Amax 与 Scale（完美隔离单 Channel 离群值）。
-- **权重**：\`128 × 128\` Block-wise 分块量化（对齐矩阵乘 K/N Tile，转置对称无需重复量化），可令前向/反向统一使用高精度 **E4M3**。
-- **解决 Hopper WGMMA 累加精度缺陷**：Hopper FP8 Tensor Core 内部累加实际只有约 14-bit 尾数精度（误差最高达 2%）。解决方案：在 GEMM 内层每累加 \`N_C = 128\` 个元素（4 条 WGMMA 指令）后，将结果晋升到 **CUDA Core FP32 寄存器**中做高精度累加，并将 Block Scale 乘入。
-- **高精度白名单**：Embedding、Output Head、MoE Router/Gating、RMSNorm、Attention Core（部分场景）、Master Weights 保持 BF16/FP32；Optimizer States 可视情况将一阶矩存为 BF16 进一步省显存。`,
+> 依据　DeepSeek-V3 Technical Report 第 3.3 节及 NVIDIA Transformer Engine《Using FP8 and FP4》。`,
   },
   {
     id: 'tr-05',
@@ -357,7 +323,7 @@ export const TRAINING_QUESTIONS = [
     tags: ['Context Parallelism', 'Ring Attention', 'Ulysses', 'Zig-Zag', 'GQA'],
     summary: '深入对比序列并行/上下文并行两大范式（Ring Attention 与 Ulysses）的通信量、Causal Mask 负载均衡与 GQA 适配限制。',
     contextSpecs: ['128K ~ 1M Context', 'GQA (64 Q / 8 KV)', 'CP=16', 'FlashAttention'],
-    prompt: '要把一个 70B GQA 模型（64 个 Query Head，8 个 KV Head）的训练上下文从 8K 扩到 256K，必须引入 Context Parallelism (CP)。请深度对比 Ring Attention 和 DeepSpeed Ulysses 两种方案的实现原理、通信量公式、优缺点，以及在 GQA + Causal Mask 场景下如何组合（Hybrid CP）并解决负载不均问题？',
+    prompt: '一个 64 个 Q head、8 个 KV head 的 70B GQA 模型要训练 256K 上下文。考虑用 16 卡做 Context Parallelism。比较 Ring Attention 与 DeepSpeed Ulysses 的数据布局、通信量和因果计算负载，给出一种不复制 KV head 的可行组合。',
     rubric: [
       {
         id: 'ring-attn',
@@ -375,9 +341,9 @@ export const TRAINING_QUESTIONS = [
       },
       {
         id: 'gqa-limit',
-        label: 'GQA 限制：Ulysses 并行度受限于 KV Head 数 (8)，超限需重复 KV 破坏带宽优势',
+        label: '无 KV 复制的 head 切分要求本地 Q/KV head 能被 Ulysses 度数整除，解释超限选项',
         weight: 20,
-        keywords: ['gqa', 'kv head', '8', '受限', '限制', '复制', '重复', 'mqa', 'mla'],
+        keywords: ['gqa', 'kv head', '受限', '整除', '复制', '重复 kv', 'mqa'],
         probe: '题目里模型只有 8 个 KV Head，如果我们想开 CP=16，直接用 Ulysses 会遇到什么硬限制？',
       },
       {
@@ -389,45 +355,45 @@ export const TRAINING_QUESTIONS = [
       },
       {
         id: 'hybrid-cp',
-        label: 'USP (Unified Sequence Parallelism) 混合方案：机内 Ulysses + 机间 Ring',
+        label: '结合本地 head 数与互连选择 Ulysses×Ring 的分解，并估算通信与重叠',
         weight: 16,
-        keywords: ['hybrid', 'usp', '混合', '机内', '机间', 'nvlink', 'ib', '组合'],
-        probe: '如果把 Ulysses 和 Ring 组合在多机集群里，应该把哪一个放在机内 NVLink，哪一个放在跨机 IB？为什么？',
+        keywords: ['hybrid', 'usp', '混合', '机内', '跨机', 'nvlink', 'ulysses', 'ring', '跨节点'],
+        probe: '给定每机 8 卡、TP=1，怎样将 Ulysses 和 Ring 映射到两个节点？若 TP 已切分 KV head，方案如何变化？',
       },
     ],
     hints: [
-      'L1 方向提示：Ulysses 通信量随并行度 $P$ 下降（$O(S/P)$），但受限于 Head 数量；Ring Attention 不受 Head 数限制，但通信量与 $S$ 成正比、依赖极高序列长度来掩盖通信。',
-      'L2 Causal 负载均衡：把序列切成 $2P$ 块，第 $i$ 张卡拿第 $i$ 块和第 $2P-1-i$ 块（首尾配对 Zig-Zag），每张卡的下三角有效计算面积完全相等！',
-      'L3 混合拓扑：机内 8 卡刚好匹配 8 个 KV Head 用 Ulysses（利用 NVLink 极速 All-to-All），跨机用 Ring Attention（P2P 点对点传递，对 IB 带宽压力小且易于与计算 Overlap）。',
+      'L1 Ring 留 Q 在本地并传 KV，Ulysses 在序列与 head 的切分之间做转置。先固定每卡发送的口径。',
+      'L2 单条等长 causal 序列可将 2P 块首尾配对，比较每个 rank 实际需算的有效 Q–K 对数。',
+      'L3 若 TP=1，每机 8 卡且有 8 个 KV head，可以在机内做 8 路 Ulysses、两台之间做 2 路 Ring。',
     ],
     followUps: [
       {
         stage: 'deepen',
-        question: '追问 1（通信量对比）：假设总序列长度 $S$ 很大，隐藏维 $H$，CP 并行度 $P$。请比较 Ulysses 与 Ring Attention 各自的通信总量（忽略 GQA 先按 MHA 算），在什么条件下 Ring 反而比 Ulysses 通信更少？',
+        question: '追问 1（通信量）　设 MHA，无 KV 复制，按每 rank 前向发送元素数比较完整 Ring 和 Ulysses。改变 P 或改为 GQA 后，二者的相对大小怎样变化？',
       },
       {
         stage: 'corner',
         question: '追问 2（变长 Packing）：预训练数据通常会做 Document Packing（多条短文档拼成一条 256K 序列，中间用 varlen mask 隔断，避免跨文档注意）。Packing 场景下 Zig-Zag Ring Attention 会遇到什么新问题？',
       },
     ],
-    referenceAnswer: `### Staff 级参考解析
+    referenceAnswer: `### 两种布局与可复算的通信账
 
-#### 1. Ring Attention vs DeepSpeed Ulysses 核心对比
-| 维度 | Ring Attention | DeepSpeed Ulysses |
+设 batch=1，全长 S，P 个 rank，Q 的总宽度为 Hq，K、V 各为 Hkv。以下只计一次前向、每 rank 发给其他 rank 的元素，BF16 乘 2 得字节。排除反向、TP 和自发自收。
+
+| 方案 | 数据布局 | 每 rank 发送元素 |
 |---|---|---|
-| **切分与通信** | 保持序列维切分；环形 P2P 传递 $K, V$ 块，借助 FlashAttention Online Softmax 累积 | Attention 前 All-to-All 把 \`[S/P, H]\` 变为 \`[S, H/P]\`；算完后再 All-to-All 换回 |
-| **单卡前向通信量（MHA）** | 每卡发收 \`2(P-1)/P · S·H\` 元素（BF16 为 \`4(P-1)/P · S·H\` 字节；GQA 时缩为 \`4(P-1)/P · S·H_kv\` 字节！） | 4 次 All-to-All（Q/K/V/O），每卡 \`4(P-1)/P · (SH/P)\` 元素（BF16 为 \`8(P-1)/P · SH/P\` 字节） |
-| **计算通信重叠** | 天然极佳（FlashAttention 算当前块同时 P2P 预取下一块 KV） | 较难完全重叠（All-to-All 必须完成后才能进 Attention） |
-| **GQA 约束** | **无限制**，且 GQA 让 KV 通信直接缩小 8×！ | 强受限：\`P ≤ n_kv_heads\`（否则需复制 KV，丢失优势） |
+| 完整 Ring | 本地保留 S/P 个 Q，轮转 P−1 块 K/V，按行维护在线 softmax 的最大值、归一化和输出分子 | 2(P−1) S Hkv / P |
+| Ulysses | Attention 前交换 Q/K/V 使每 rank 拥有全序列的部分 head，之后逆交换 O | (P−1) S (2Hq+2Hkv) / P² |
 
-#### 2. Causal Mask 负载不均与 Zig-Zag (Striped) 优化
-- 若直接连续切分，Rank 0 只算左下角极小面积，Rank $P-1$ 算满全三角，算力倾斜近 $2\times$。
-- **Zig-Zag 切分**：将序列等分为 $2P$ 个 Chunk，Rank $i$ 持有 \`Chunk[i]\` 和 \`Chunk[2P-1-i]\`（首尾对称配对）。例如 $P=4$ 时，Rank 0 拿 \`(0,7)\`，Rank 1 拿 \`(1,6)\`，每张卡的 Causal Attention FLOPs 严格相等。
+Q/K/V 可打包成一次 All-to-All，也可分别发。MHA 时两者之比 Ring/Ulysses = P/2，P=2 相等，P>2 时完整 Ring 发得更多。GQA 下比值为 P Hkv/(Hq+Hkv)，较窄的 KV 有利于 Ring。减枝的 causal 通信、KV 复制或不同网络拓扑要重新计数。通信量和暴露延迟是两种指标。
 
-#### 3. 256K + GQA (8 KV Heads) 最佳实践：USP (Hybrid CP)
-- **机内 NVLink (Ulysses=8)**：正好对齐 8 个 KV Head，单机 NVLink 毫秒级完成 All-to-All，不复制 KV。
-- **机间 IB (Ring=2 或 4)**：跨机只传压缩后的 KV（已按 GQA 缩小 8×），且通过 FlashAttention 完整 Overlap 掩盖 IB 传输延迟。
-- **Document Packing 追问**：当 256K 内混杂极长文档和大量短文档时，静态 Zig-Zag 仍可能负载不均，工程上需引入 **Per-Document Load Balancing / Context-aware Packing**（如 Megatron THD 格式 + 动态负载均衡调度）。`,
+### 16 卡、8 个 KV head
+
+在 TP=1、每机 8 卡时，机内 NVLink 做 Ulysses=8、跨机做 Ring=2 可令每个 Ulysses rank 分得 8 个 Q head、1 个 KV head。纯 16 路按 head 均分需要复制 KV 或换算法。Ring 对齐当前 KV 块和下一块传输，实际重叠取决于块计算时间和链路。
+
+单条 causal 序列的尾端 Q 能看到更多 K，连续均分 token 会使后部 rank 更忙。将 2P 个等长块首尾配对可平衡有效 Q–K 对数。若 packed 文档使用文档间隔离 mask，还要按各文档的真实边界累计这些对数，按 token 均分可能失衡。若允许跨文档 attention，则用连续序列的 mask 来算。
+
+> 依据　DeepSpeed-Ulysses（arXiv:2309.14509）和 Ring Attention（arXiv:2310.01889）。`,
   },
   {
     id: 'tr-06',
@@ -437,8 +403,8 @@ export const TRAINING_QUESTIONS = [
     frequency: '高频必考',
     incident: true,
     tags: ['容错', 'Checkpoint', 'SDC', 'NCCL Hang', 'Straggler'],
-    summary: '万卡训练平均每数小时发生一次硬件故障，如何定位静默数据损坏 (SDC)、NCCL Hang、慢节点，并把 MTTR 压到分钟级？',
-    contextSpecs: ['10,000+ GPUs', 'Goodput > 95%', 'MTBF ~3~6 Hours', 'Async Checkpoint'],
+    summary: '从 8192 卡训练作业的超时、Loss Spike 和重启耗时入手，定位故障并验证 checkpoint 的可恢复性。',
+    contextSpecs: ['8192×H100', '题设 Goodput 72%', '重启 25 分钟', 'Async Checkpoint'],
     prompt: '【线上实战排障】你负责维护一个 8192 卡 H100 预训练任务。过去一周集群有效训练时间（Goodput）跌到了 72%：一方面频繁出现 NCCL Timeout/Hang 和偶发 Loss Spike，另一方面每次节点故障重启加载 Checkpoint 要花 25 分钟。请系统性地设计一套排障定位与高可用容错体系。',
     rubric: [
       {
@@ -446,7 +412,7 @@ export const TRAINING_QUESTIONS = [
         label: 'NCCL Hang / 慢节点排查：Flight Recorder、Trace 归因、区分真 Hang vs 单点 Straggler',
         weight: 22,
         keywords: ['flight recorder', 'watchdog', 'hang', 'straggler', '慢节点', '降频', 'thermal', 'ib', '丢包', 'pfc', 'trace'],
-        probe: '报 NCCL Timeout 时，日志里 8192 张卡都在报错。你怎么在 1 分钟内定位到底是哪 1 张卡或者哪条光模块拖死了整个集合通信？',
+        probe: '超时后怎样比较各 rank 的 collective 顺序和时间，把嫌疑范围缩小到代码、设备或链路？',
       },
       {
         id: 'sdc-spike',
@@ -457,14 +423,14 @@ export const TRAINING_QUESTIONS = [
       },
       {
         id: 'async-ckpt',
-        label: '异步持久化 Checkpoint：GPU -> CPU Pinned Memory 秒级快照 + 后台写 DFS，消除阻塞',
+        label: '一致版本快照、训练侧阻塞和异步持久化分别计时。完整提交后才能恢复',
         weight: 22,
         keywords: ['async', '异步', 'checkpoint', 'pinned', 'cpu', '快照', 'snapshot', '后台', '阻塞', 'dfs'],
-        probe: '传统同步写 Checkpoint 每次都要停训几分钟，异步 Checkpoint 怎么做到把训练阻塞时间降到 1~2 秒以内？要注意什么一致性问题？',
+        probe: '异步 checkpoint 哪一阶段仍会阻塞训练？何时可安全改写源状态，何时可宣告该 checkpoint 可恢复？',
       },
       {
         id: 'fast-recovery',
-        label: '分钟级快速恢复：In-Memory Peer Recovery（健康节点内存广播权重）+ 冗余热备节点 (Hot Spare)',
+        label: '验证 DP peer 是否覆盖全部状态分片，再选择内存副本、持久化 checkpoint 或热备',
         weight: 20,
         keywords: ['in-memory', '内存恢复', 'peer', '热备', 'hot spare', 'dp', '广播', 'broadcast', '弹性', 'elastic'],
         probe: '重启加载 Checkpoint 要花 25 分钟通常卡在远程分布式存储读带宽和进程冷启动。既然 DP 组里其他副本节点还活着，能不能不读磁盘直接恢复？',
@@ -478,9 +444,9 @@ export const TRAINING_QUESTIONS = [
       },
     ],
     hints: [
-      'L1 方向提示：Goodput = (1 - 故障停机占比 - Checkpoint开销 - 慢节点拖尾)。按“快速定位 -> 快速止血恢复 -> 事前防呆”三段式回答。',
-      'L2 内存恢复提示：因为 DP 副本间参数相同、或者仅挂掉 1 台机器，可由健康节点从内存直接通过 RDMA/NCCL 向替换进来的热备节点拷贝权重+优化器状态（如 ByteRobust / MegaScale / TorchFT），秒级续训！',
-      'L3 SDC 排查提示：在怀疑节点上跑固定种子的 GEMM Checksum 自检（如已知黄金结果的 MatMul），同时对异常步保存 Data Loader Index 做隔离重放验证。',
+      'L1 明确 Goodput 的分母，用已提交的有效 token 或未丢失的进度识别慢步、阻塞、停机和重放。',
+      'L2 同号权重副本可能缺失优化器或 RNG 分片。恢复前先验证同一步的全状态覆盖。',
+      'L3 在健康与嫌疑节点做相同输入的确定性重放，对照数值容差、版本与硬件错误记录。',
     ],
     followUps: [
       {
@@ -492,23 +458,18 @@ export const TRAINING_QUESTIONS = [
         question: '追问 2（弹性训练）：如果坏了一台机器但集群暂时没有热备机，有没有办法降级到 8184 卡继续跑而不影响算法超参（Global Batch Size / LR 调度）？',
       },
     ],
-    referenceAnswer: `### Staff/Principal 级高可用容错架构
+    referenceAnswer: `### 从第一个分歧定位
 
-#### 1. 定位 NCCL Hang 与慢节点 (Straggler)
-- **开启 PyTorch NCCL Flight Recorder (\`TORCH_NCCL_TRACE_BUFFER_SIZE\`)**：在环形缓冲区记录每张卡最近的 Collective 序号、开始/完成时间戳。一旦超时自动 Dump，全局比对即可定位出**唯一未进入 Collective 的卡**（算子/Dataloader 卡死）或**进入最晚的卡**（慢节点）。
-- **慢节点根因**：GPU 过热降频 (Thermal Throttling)、PCIe 降速、IB 光模块误码/重传/PFC 风暴、Host CPU/内存页回收卡顿。通过每步记录 Step 内的 Stage 耗时分布，识别 P99 离群节点自动告警驱逐。
+- 题设的 72% 应先核对分母。净新增且保留的训练 token 数除以墙钟时间得到 token/s，再除以同配置健康基线速率可得到百分比。若平台按有效 GPU·秒占比分摊，则沿用平台定义。对齐超时前各 rank 的 step、process group、collective 序号/形状、进入和完成时间。PyTorch NCCL Flight Recorder 的环形缓冲和超时 dump 需事先开启。缺席 rank 可能卡在上一算子、数据加载或不同的代码分支。所有 rank 都进入同一操作时，再看链路重试、GPU Xid、ECC、降频和通信拓扑。超时报错的 rank 未必是故障源。
+- Loss Spike 时保存权重、优化器、RNG、数据游标和局部梯度统计。相同软件、checkpoint、样本在健康机和嫌疑机交叉重放，控制非确定性规约。单次未复现不足以诊断 SDC。跟随设备重复出现的数值异常和独立硬件校验能增强归因。
 
-#### 2. Loss Spike 与 SDC (Silent Data Corruption) 根因分离
-- **两步诊断**：(1) 记录每步 Data Index 与各 Rank 的 Local Grad Norm；(2) 若出现 Spike，先在另一组健康节点上用相同 Checkpoint + 相同 Batch 重放——若**复现**则是脏数据/学习率/数值稳定性问题（跳过该 Batch 或回滚）；若**不复现**则高度怀疑原节点发生了 **SDC**，立即在嫌疑节点执行确定性 GEMM/Attention Golden-Output 校验隔离坏卡。
+### 快照和恢复的两个完成时刻
 
-#### 3. 把 Checkpoint 与恢复耗时从 25 分钟压到 < 2 分钟
-- **两级异步 Checkpoint**：
-  - Stage 1 (同步阻塞 < 1~2s)：使用 Pinned Host Memory，通过独立 Copy Stream 将 GPU 状态 D2H 拷贝至本机内存（必须在下一步 \`optimizer.step()\` 写脏参数前通过 CUDA Event 同步完 D2H，或采用 Copy-on-Write / 双缓冲）。
-  - Stage 2 (完全后台异步)：独立进程将 Host 内存快照分片异步刷盘到并行文件系统/对象存储。
-- **免冷启 & In-Memory Recovery**：
-  - **热备节点池 (Hot Spare)** 预拉镜像与驱动；
-  - 节点故障时无需重启全部 8192 个进程（或使用热进程池），且优先从健康 DP Peer 节点通过 RDMA 直接 **Peer-to-Peer 内存恢复**参数，彻底绕开共享存储读放大风暴；
-  - 结合 XID 关键错误（如 XID 48/63/74/79/94/95）、NVLink CRC 错误、IB 丢包计数器实现分钟级自动隔离驱逐。`,
+1. 在同一逻辑步冻结全部可变状态。让 D2H 等待生产者 stream，再通过 event 或独立不可变副本，保证任何写入都晚于对应读取。Pinned host 缓冲在后台写出前保持有效。限制在途快照数并测量 staging 阻塞。
+2. 各 rank 的分片和元数据持久化、完整性检查通过后再提交 manifest。故障时选择最近一次完整提交。恢复模型、optimizer、scheduler、RNG 和数据状态。机内副本或热备能缩短恢复，前提是同一步的每个必要分片都有幸存冗余，并能重建通信组。
+3. **8192→8184**。先确认 TP/PP/CP 和专家组能否在新 world size 上整除，再核对新 DP、mbs、梯度累积能否精确保持 GBS，以及分片能否重排。若整数条件不成立，可另选可行的参与卡数或并行布局。按已消费 token 恢复学习率和数据游标，验证一次故障演练的丢失进度与恢复墙钟耗时。
+
+> 依据　PyTorch《Flight Recorder》及《Asynchronous Saving with Distributed Checkpoint》。`,
   },
   {
     id: 'tr-07',
@@ -527,25 +488,25 @@ export const TRAINING_QUESTIONS = [
         label: 'GPipe vs 1F1B：气泡率均为 (p-1)/(m+p-1)，但 1F1B 将激活峰值从 O(m) 降为 O(p)',
         weight: 22,
         keywords: ['gpipe', '1f1b', 'p-1', '激活', '显存', 'warmup', 'cooldown', '峰值', 'o(p)', 'o(m)'],
-        probe: 'GPipe 和基础 1F1B 的理论气泡率其实是一样的！那为什么工业界几乎全都用 1F1B 替代 GPipe？',
+        probe: '在同样的理想气泡率下，1F1B 与先做完所有前向的 GPipe 在激活生命周期上有何区别？',
       },
       {
         id: 'interleaved',
-        label: 'Interleaved 1F1B (VPP)：每卡分配 v 个不连续虚拟 Stage，气泡降为 1/v，代价是 P2P 通信增 v 倍',
+        label: '在阶段均衡、通信可忽略时区分 VPP 的气泡时间与占比。解释新增的 P2P 边界',
         weight: 22,
         keywords: ['interleaved', 'vpp', '虚拟', '1/v', '通信增加', 'v倍', 'p2p', 'chunk'],
-        probe: 'Interleaved 1F1B 把气泡缩小了 v 倍，它付出的代价是什么？（提示：看通信和激活显存）',
+        probe: 'VPP 的气泡时间和气泡占总时间的比例分别怎样变化？通信次数与激活峰值如何估计？',
       },
       {
         id: 'bw-split',
-        label: 'Zero-Bubble 核心洞察：将反向拆为 B (对输入求导，在关键路径) 和 W (对权重求导，无上游依赖)',
+        label: 'Zero-Bubble 拆分输入梯度和权重梯度，使 dX 优先跨 stage 传回，dW 在更新前完成',
         weight: 26,
-        keywords: ['zero-bubble', 'zero bubble', 'zb', '拆分', 'b', 'w', '输入梯度', '权重梯度', 'dgrad', 'wgrad', '依赖'],
+        keywords: ['dgrad', 'wgrad', 'dx', 'dw', '输入梯度', '权重梯度', '依赖', '延后', '关键路径'],
         probe: '为什么反向传播拆成 B (dgrad) 和 W (wgrad) 就能填满气泡？B 和 W 的数据依赖有什么本质区别？',
       },
       {
         id: 'zb-tradeoff',
-        label: 'ZB-H1 vs ZB-H2 权衡：W 延迟执行会拉长激活生命周期（ZB-H2 显存最高翻倍）及 Optimizer 同步问题',
+        label: 'ZB-H1/H2 延后 W 的激活预算和 optimizer 全局校验代价',
         weight: 18,
         keywords: ['zb-h1', 'zb-h2', '显存', '生命周期', 'optimizer', 'rollback', '同步', 'grad norm', 'allreduce'],
         probe: '把 W 往后推去填 Cooldown 气泡，会带来哪两个现实问题？（显存和 Optimizer Step 全局同步）',
@@ -555,12 +516,12 @@ export const TRAINING_QUESTIONS = [
         label: '对比 DualPipe 双向注入：不仅消气泡，还兼顾 MoE All-to-All 通信与计算重叠',
         weight: 12,
         keywords: ['dualpipe', '双向', 'all-to-all', 'overlap', 'moe', '权重两份'],
-        probe: '既然 Zero-Bubble 已经几乎做到 0 气泡，为什么 DeepSeek-V3 还要发明 DualPipe？',
+        probe: '在跨机 MoE 场景，DualPipe 的调度还要覆盖哪些通信？',
       },
     ],
     hints: [
       'L1 方向提示：任何 Linear 层 $Y = XW$ 的反向都有两步矩阵乘：算 $\\nabla X = \\nabla Y \\cdot W^T$ (记为 B) 和算 $\\nabla W = X^T \\cdot \\nabla Y$ (记为 W)。',
-      'L2 关键依赖：上游 Stage 只等你的 B ($\\nabla X$)，根本不等你的 W ($\\nabla W$)！所以 W 可以被调度器自由挪到任意气泡空隙里执行。',
+      'L2 上一 stage 要等待 dX。dW 在本地输入和输出梯度就绪后可延后，但必须赶在参数更新之前，且中间值要保留至使用结束。',
       'L3 显存细节：W 需要保留前向激活 $X$ 直到 W 算完才能释放，因此推迟 W 越多（如 ZB-H2），峰值激活显存越大。',
     ],
     followUps: [
@@ -573,26 +534,17 @@ export const TRAINING_QUESTIONS = [
         question: '追问 2（Stage 负载不均）：在 LLM 中，Stage 0 有 Embedding，最后一个 Stage 有 LM Head + 128K 词表的 Cross-Entropy，往往导致最后一个 Stage 耗时和显存远大于中间 Stage，实际工程怎么调平？',
       },
     ],
-    referenceAnswer: `### Staff 级参考解析
+    referenceAnswer: `### 先定义气泡率
 
-#### 1. 流水线调度演进对比（$p$ = PP 数，$m$ = Micro-batch 数，$v$ = 虚拟 Stage 数）
-| 方案 | 理论气泡率 | 峰值激活显存（相对单 micro-batch） | P2P 通信量 |
-|---|---|---|---|
-| **GPipe** | $\\frac{p-1}{m+p-1}$ | $O(m)$（必须攒完所有前向才反向） | $1\\times$ |
-| **1F1B** | $\\frac{p-1}{m+p-1}$ | $O(p)$（早反向早释放激活） | $1\\times$ |
-| **Interleaved 1F1B** | $\\frac{p-1}{v\\cdot m + p - 1}$ | 略高于 1F1B（约 $(1 + \\frac{p-1}{p\\cdot v})\\times$） | $v\\times$ |
-| **ZB-H1** | 约 $\\frac{1}{3}$ 原始气泡（假设 $T_F \\approx T_B \\approx T_W$） | 与 1F1B **相同** $O(p)$ | $1\\times$ |
-| **ZB-H2** | **接近 0%** | 最高约 $2\\times$ 1F1B（推迟释放激活） | $1\\times$ |
+p 为物理 stage 数，m 为每个副本每步的 micro-batch 数。气泡率是单 stage 空闲时间占迭代总时间的比例。阶段均衡、消息开销可忽略时，GPipe 和同步 1F1B 都是 (p−1)/(m+p−1)。p=8、m=32 时为 7/39≈17.9%。GPipe 的首段可积攒 m 份激活，1F1B 的常规调度最多约 min(m,p) 份，具体看 stage。
 
-#### 2. Zero-Bubble 的核心打破点
-- 对线性层 $Y = XW$，反向分为两步：
-  - **B (dgrad)**：$\\nabla X = \\nabla Y W^T$ — 位于关键路径，必须立即传给前一个 Stage；
-  - **W (wgrad)**：$\\nabla W = X^T \\nabla Y$ — **无跨 Stage 依赖**，只依赖本地缓存的 $X$ 与 $\\nabla Y$，可灵活调度填入 Warmup/Cooldown 气泡中！
-- **Optimizer Post-Validation 技巧**：为了避免等待全局 Grad Norm / NaN 同步产生同步气泡，ZB 让各 Stage 先基于前一步状态乐观更新（或延迟一步校验），仅在极少见的 NaN 发生时执行 Rollback。
+- 每个 rank 交错执行 v 个等时虚拟 stage 时，理想气泡**时间**降至 1/v，**占比**为 (p−1)/(vm+p−1)。v=2 时是 7/71≈9.9%。线性链经过 pv−1 个逻辑边界，跨卡消息取决于映射。额外通信与负载不均会侵蚀收益。
+- 线性层 Y=XW 的反向含 dX=dY Wᵀ 和 dW=Xᵀ dY。前一 stage 要等 dX 才能继续。dW 只需在本次更新前完成，把它移入空档可缩短关键路径，代价是 X、dY 活得更久。
+- **ZB-H1/H2**。论文在 F、B(dX)、W(dW) 各耗 t 且通信可忽略的模型中，基准气泡时间为 3(p−1)t，H1 约为 (p−1)t，激活预算与 1F1B 相当，其理想气泡占比为 (p−1)/(3m+p−1)。H2 可达零调度气泡，激活预算最高约为两倍。实测时应代入各段耗时、通信和峰值显存。
+- **更新边界**。全局 grad norm 和非有限值检查可能阻塞下一步。论文的 optimizer post-validation 乐观执行，若全局结果需要裁剪或跳步，恢复一致状态并重做受影响计算。回滚频繁时收益下降。DualPipe 还把 MoE 的 dispatch/combine 与另一批计算错开，目标包括缩短暴露通信。
+- **调平首尾**。测每个 stage 的前反向时间和激活峰值，按 embedding、LM head、词表 CE 的开销调层数。分块 CE 侧重降低显存，是否缩短末段须重新计时。
 
-#### 3. 首尾 Stage 不均衡（Embedding / LM Head）工程优化
-- 将首个 Stage 和末尾 Stage 各少分 1~2 层 Transformer Layer（Megatron \`--decoder-first-pipeline-num-layers\` / \`--decoder-last-pipeline-num-layers\`）；
-- 或者将 Embedding 和 LM Head 独立拆出为单独阶段 / 结合 Chunked CrossEntropy 压平末尾显存峰值。`,
+> 依据　Megatron-LM（arXiv:2104.04473）与 Zero Bubble Pipeline Parallelism（arXiv:2401.10241）。`,
   },
   {
     id: 'tr-08',
@@ -602,20 +554,20 @@ export const TRAINING_QUESTIONS = [
     frequency: '高频必考',
     incident: false,
     tags: ['MFU', '6ND', 'FLOPs', '性能分析', '端到端估算'],
-    summary: '用 6ND 公式快速心算千卡训练 70B 模型的周期，并精准剖析为什么真实 MFU 很难超过 50%~55%。',
+    summary: '用 6ND 估算千卡训练周期，区分有效模型 FLOPs、实际执行 FLOPs 和集群停机时间。',
     contextSpecs: ['70B Dense', '15T Tokens', '1024×H100 BF16 989 TFLOPS', 'MFU 估算'],
-    prompt: '老板问你：用 1024 张 H100 (BF16 稠密峰值 989 TFLOPS) 从零预训练一个 70B Dense 模型，训 15T Tokens，大概需要多少天？请现场给出你的定量推导过程（列出假设的 MFU）；然后深入解释：为什么哪怕没有任何网络故障，实际 MFU 往往卡在 45%~55%，剩下 45% 的算力到底去哪儿了？',
+    prompt: '1024 张 H100 SXM、BF16 稠密峰值每卡 989 TFLOP/s，预训练 70B Dense 模型，消费 15T tokens。忽略长序列 attention 的二次项，任选一组合理 MFU 估算天数。若实测 MFU 为 48%，用哪些证据区分重算、GPU 算子、通信和停机的影响？',
     rubric: [
       {
         id: 'flops-6nd',
-        label: '正确使用 6ND（含重算 8ND 注意 MFU 定义按模型有效 FLOPs 6ND 算）并算出总 FLOPs ≈ 6.3e24',
+        label: '说明 6ND 是参数矩阵乘的有效训练 FLOPs 近似，算出 6.3×10²⁴，并说明重算口径',
         weight: 25,
         keywords: ['6nd', '6*n*d', '6×', '6.3', '10^24', 'e24', '8nd', 'flops', '有效算力'],
-        probe: '开启 Full Activation Checkpointing 时 GPU 实际做了 8ND 次计算，那算 MFU 时分子应该用 6ND 还是 8ND？为什么？',
+        probe: '按参数矩阵乘近似，全前向重算一次增加多少 FLOPs？计算 MFU 和 HFU 时各计入哪些工作？',
       },
       {
         id: 'days-calc',
-        label: '端到端天数计算准确：1024×989e12×MFU(0.45~0.5) ≈ 4.5~5e17 FLOP/s => 约 140~160 天',
+        label: '时间换算使用 10¹² FLOP/TFLOP 和 86,400 秒/天，48% 时约 150 天',
         weight: 22,
         keywords: ['天', 'day', '140', '150', '160', '145', '86400', '45%', '50%', '989'],
         probe: '能把具体天数算出来吗？（提示：一天 86400 秒，1024 卡 × 989 TFLOPS ≈ 1e18 FLOP/s，按 50% MFU 算大概多少天？）',
@@ -636,16 +588,16 @@ export const TRAINING_QUESTIONS = [
       },
       {
         id: 'power-thermal',
-        label: '硬件物理现实：标称 989 TFLOPS 实际受 700W TDP 功耗墙限制（GEMM 极限约 820~850 TFLOPS）',
+        label: '区分 SKU 标称 dense 峰值与对应形状的实测速率，结合时钟、功耗及 Tensor Core 指标判断',
         weight: 13,
-        keywords: ['tdp', '功耗', '700w', '主频', '频率', '850', '800', 'cublas', '理论极限'],
+        keywords: ['tdp', '功耗', '主频', '时钟', '频率', 'cublas', '形状', 'shape', '带宽', '峰值'],
         probe: '如果单卡只跑一个超大 cuBLAS BF16 GEMM（完全无通信、无其他算子），在 H100 上实测能跑到 989 TFLOPS 吗？',
       },
     ],
     hints: [
       'L1 估算捷径：总 FLOPs ≈ $6 \\times 70\\times 10^9 \\times 15\\times 10^{12} = 6.3 \\times 10^{24}$。1024 张 H100 理论峰值约 $1.01 \\times 10^{18}$ FLOP/s。',
-      'L2 天数速算：$6.3\\times 10^{24} / (1.01\\times 10^{18} \\times 0.48) \\approx 1.3 \\times 10^7$ 秒 $\\approx 150$ 天（若切 FP8 有效提速 ~1.4-1.5× 可压到 ~100 天）。',
-      'L3 损耗拆解：功耗墙 (~15%) + 激活重算 (若开 Full 耗 25%) + Memory-bound 算子 (Norm/RoPE/Elementwise/Optimizer ~10-15%) + 通信/PP 气泡 (~10-15%)。',
+      'L2 有效时间 = 总 FLOPs / (卡数 × 单卡 dense FLOP/s × MFU)。单独记录是否已经包含 checkpoint 和停机。',
+      'L3 用时间线区分重算、关键路径上暴露的通信、访存受限算子与 host 空档，避免重复计算重叠时间。',
     ],
     followUps: [
       {
@@ -654,26 +606,18 @@ export const TRAINING_QUESTIONS = [
       },
       {
         stage: 'corner',
-        question: '追问 2（HFU 高但 MFU 低）：你在监控面板上看到 GPU Util 一直是 100%，HFU 高达 68%，但 MFU 只有 38%，这通常说明系统配置踩了什么坑？',
+        question: '追问 2（计数口径）　GPU busy 100%、HFU 68%、MFU 38%。一次完整前向重算能否独自解释这个差距，接下来应该核对什么？',
       },
     ],
-    referenceAnswer: `### Staff 级定量推导与损耗拆解
+    referenceAnswer: `### 70B、15T tokens 的训练时间
 
-#### 1. 端到端训练时间速算
-- **有效总计算量**（忽略超长序列二次项时）：
-  $$\\text{FLOPs} \\approx 6 N D = 6 \\times (70 \\times 10^9) \\times (15 \\times 10^{12}) = 6.3 \\times 10^{24}$$
-  *(若序列长度 $S$ 很大，需加上 Attention 二次项：Causal 跳过上三角后约 $6 \\cdot L \\cdot d \\cdot S$ FLOPs/token，未跳过按全矩阵计为 $12 \\cdot L \\cdot d \\cdot S$。)*
-- **集群有效算力**（1024×H100 BF16 标称 989 TFLOPS，假设合理工程 MFU = **48%**）：
-  $$1024 \\times 989 \\times 10^{12} \\times 0.48 \\approx 4.86 \\times 10^{17}\\text{ FLOP/s}$$
-- **总耗时**：
-  $$T = \\frac{6.3 \\times 10^{24}}{4.86 \\times 10^{17}} \\approx 1.296 \\times 10^7\\text{ s} \\approx \\mathbf{150\\text{ 天}}$$
-  *(加上约 5% 集群宕机/Ckpt 开销，实际交付约 **158 天**；若升级 FP8 训练，MFU 相对 BF16 提速 ~1.35~1.5×，可缩至 ~105 天。)*
+按 dense Transformer 的参数矩阵乘近似，每参数每 token 约 2 FLOPs 前向、4 FLOPs 反向。总计 6ND = 6×70×10⁹×15×10¹² = **6.3×10²⁴ FLOPs**。H100 SXM 取题设 BF16 非稀疏峰值。1024 卡按 MFU=0.48 得 4.86×10¹⁷ FLOP/s，训练天数为 6.3×10²⁴/(4.86×10¹⁷×86,400) ≈ **150 天**。按 45% 和 50% 分别约 160 天和 144 天。如果 MFU 只在有效稳态步上测，且有效训练时间占墙钟的 95%，交付约 150/0.95≈158 天。若已按端到端 token/s 计算，停机已经计入。
 
-#### 2. 缺失的 ~50% 算力去哪了？
-1. **硬件 TDP 功耗墙 (~15%)**：700W 满载跑大 GEMM 时 H100 核心频率会动态回落，单卡纯 cuBLAS 极限通常在 ~820-850 TFLOPS（标称 989 的 ~85%）。
-2. **激活重算 Overhead (HFU vs MFU 剪刀差)**：MFU 分子只认有效 6ND；如果开了 Full Checkpointing，实际执行 8ND（多花 33% 前向计算），这就是为什么可能出现 **HFU=65% 但 MFU=48%**。
-3. **非矩阵 Memory-Bound 算子 (~10-15%)**：RMSNorm、RoPE、SwiGLU、Cross-Entropy、AdamW 更新全是访存密集型，拉低算力利用率（靠 TorchCompile / Liger-Kernel 融合压低）。
-4. **并行通信与流水线气泡 (~10-15%)**：TP 未完全重叠的 AllReduce/AllGather、PP Bubble、DP 尾部同步、以及慢节点尾延迟。
-5. **Host Overhead & DataLoader**：Python 调度、小 Kernel Launch 延迟、分布式数据预处理抖动。`,
+- 6ND 忽略 attention 的序列相关项。每层全注意力的 QKᵀ 和 PV 前反向约多 12HS FLOPs/token，因果只计有效三角形时长序列近似减半。比较 MFU 时统一模型 FLOPs 定义、precision 和峰值。
+- MFU 分子是有效模型 FLOPs，HFU 按实际执行（含重算）计。简单全前向重算约由 6ND 变为 8ND，二者峰值口径一致时 HFU/MFU 约 4/3。观测 68%/38% 已超过这个比值，应核查额外重算、padding、算子计数和采样窗口。GPU busy 100% 只说明采样期间有核在执行。
+- 用相同形状和 dtype 的 GEMM 基准与时钟、功耗记录检查单卡效率。用 step 时间线量化未重叠的 TP/DP 通信、PP 空档、访存核和主机等待。各项可能重叠，应以关键路径归因。
+- **4096 卡、45 天**。固定同一任务量属于 strong scaling，所需端到端 MFU 约 6.3×10²⁴/(4096×989×10¹²×45×86400) ≈ **40%**。核对 GBS 下每 rank 可用 micro-batch 数，再测扩容后的通信和气泡。
+
+> 依据　PaLM（arXiv:2204.02311）关于 MFU 的定义及 NVIDIA H100 SXM 产品规格。`,
   },
 ];

@@ -26,7 +26,7 @@ export const TRACKS = {
     short: 'RL Infra',
     color: 'var(--track-rl)',
     badgeClass: 'badge-rl',
-    desc: 'PPO/GRPO、veRL vs OpenRLHF、权重同步、长CoT长尾、CuMem Sleep、Agentic沙箱与精度对齐',
+    desc: 'PPO/GRPO、训练与 Rollout 共置或分池、权重同步、长 CoT 长尾、CuMem Sleep、Agentic 沙箱与精度对齐',
   },
   kernel: {
     id: 'kernel',
@@ -127,12 +127,12 @@ export const TECH_STACK_TAGS = [
 ];
 
 export const FORMULA_SNIPPETS = [
-  { label: '6ND 算力', text: '总 FLOPs ≈ 6·N·D，MFU = (6·N·D / T) / (GPU数 × 峰值TFLOPS)' },
-  { label: '16Ψ 显存', text: '静态显存 16Ψ = BF16权重(2Ψ) + 梯度(2Ψ) + FP32主权重(4Ψ) + Adam m/v(8Ψ)' },
-  { label: 'KV Cache', text: '单Token KV = 2 × L × n_kv × d_h × bytes；总KV = B × S × 单Token KV' },
-  { label: 'Roofline OI', text: 'Ridge Point = Peak_FLOPS / HBM_BW (H100 BF16 ≈ 295 FLOPs/Byte)；Decode OI = 2B / bytes' },
-  { label: 'AllReduce', text: 'Ring AllReduce 每卡收发 = 2·(N-1)/N · S (ReduceScatter + AllGather)' },
-  { label: 'PP Bubble', text: '1F1B 气泡率 = (p-1)/(m+p-1)，Interleaved VPP 后降至 (p-1)/(v·m+p-1)' },
+  { label: '6ND 算力', text: 'Dense 参数矩阵乘训练 FLOPs ≈ 6ND。若 T 单位为秒、F 为单卡对应精度的 dense 峰值（TFLOP/s），MFU ≈ 6ND / (T × 卡数 × F × 10¹²)。长序列另计 attention。' },
+  { label: '16Ψ 显存', text: 'BF16 权重和梯度各 2Ψ 字节，FP32 主权重 4Ψ，Adam 两个 FP32 矩 8Ψ。在这些状态均常驻且未分片时合计 16Ψ 字节。' },
+  { label: 'KV Cache', text: '等维 K/V 的 MHA 或 GQA，每 token 逻辑字节 = 2 × L × n_kv × d_h × 元素字节数。独立请求的总量再乘各请求长度之和，分片、共享前缀和页取整另计。' },
+  { label: 'Roofline OI', text: 'Ridge = dense 峰值 FLOP/s ÷ HBM byte/s。H100 SXM BF16 约 295 FLOPs/byte。Decode 线性层若只计权重读取，OI ≈ 2B/b_w，B 为本轮 token 数，b_w 为每个权重的字节数。' },
+  { label: 'AllReduce', text: 'Ring AllReduce，N 个 rank、每个输入 S 字节，每 rank 发送和接收各为 2(N−1)S/N 字节。nccl-tests 的 busbw = algbw × 2(N−1)/N。' },
+  { label: 'PP Bubble', text: '各 stage 均衡且忽略通信时，1F1B 空闲时间占比 = (p−1)/(m+p−1)，交错 v 个等时 chunk 后约为 (p−1)/(vm+p−1)。m 为每个副本每步的 micro-batch 数。' },
 ];
 
 export const ALL_QUESTIONS = [

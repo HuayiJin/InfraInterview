@@ -7,131 +7,133 @@ export const RL_QUESTIONS = [
     frequency: '高频必考',
     incident: false,
     tags: ['PPO', 'GRPO', 'DPO', 'RLHF', 'Rollout瓶颈'],
-    summary: '定量拆解 PPO 四模型显存爆炸 vs GRPO 去 Critic 化对系统架构的颠覆：为什么算力重心彻底偏向在线 Rollout 推理？',
-    contextSpecs: ['Actor / Critic / Ref / RM', 'GRPO Group Size G=8~64', 'Rollout 70%~85% Time', 'Rule-based Verifier'],
-    prompt: '从 AI Infra 视角对比 DPO、传统 PPO 和 DeepSeek-R1 广泛使用的 GRPO（Group Relative Policy Optimization）：它们各自在显存里需要驻留哪些模型与状态？为什么 GRPO 去掉 Critic 模型后，整个 RL 训练集群的系统瓶颈反而从“训练显存”彻底转移到了“在线 Rollout 推理吞吐与长尾延迟”？',
+    summary: '在给定精度与参数规模下比较 PPO、GRPO 和离线 DPO 的状态开销，并拆解采样与更新耗时。',
+    contextSpecs: ['Actor / Critic / Ref / RM', '同 prompt 采样 G 条', 'BF16 / FP32 Adam 示例', '规则或模型奖励'],
+    prompt: '从系统角度比较经典 RLHF-PPO、GRPO 和离线 DPO。分别列出需要训练、只做前向以及可以预计算的状态。若角色均为 70B 且独立常驻，给出一组显存算例。GRPO 去掉 critic 后，哪些工作负载会让 rollout 成为瓶颈？怎样验证？',
     rubric: [
       {
         id: 'ppo-4models',
-        label: 'PPO 四模型开销：Actor(训练16Ψ) + Critic(训练16Ψ) + Reference(推理2Ψ) + Reward Model(推理2Ψ)，总静态显存高达 ~36Ψ',
+        label: '经典四个独立等大模型的特例为 36Ψ 字节，区分各角色、精度、常驻量与单卡峰值',
         weight: 24,
-        keywords: ['actor', 'critic', 'ref', 'reward', 'rm', '四模型', '4个模型', '16', '36', '显存爆炸', 'optimizer'],
-        probe: '如果 Actor 和 Critic 都是 70B 模型，算一下标准 PPO 全驻留显存光静态权重+优化器就要占多少 GB？',
+        keywords: ['actor', 'critic', 'reference', 'reward', 'rm', '四模型', '36ψ', '主权重', 'adam', 'optimizer'],
+        probe: '在四个独立等大的 70B 模型且采用题设精度时，状态合计多少？单机峰值还需要知道哪些布局条件？',
       },
       {
         id: 'grpo-no-critic',
-        label: 'GRPO 架构减负：去掉 Critic (省掉一半训练显存 ~16Ψ)，且可结合 Rule-based Verifier (数学/代码) 省掉 RM，靠同 Prompt 采样 G 组输出算组内相对 Advantage',
+        label: 'GRPO 按同一 prompt 的 G 个回答构造组内相对优势，可使用规则奖励或学习式 RM',
         weight: 24,
         keywords: ['grpo', '去掉critic', '无critic', 'group', 'g个', '组内', '相对', 'advantage', 'verifier', '规则奖励', '省显存'],
         probe: 'GRPO 怎么在没有 Critic Value Model 的情况下估计 Advantage？这为显存和系统架构省掉了哪些组件？',
       },
       {
         id: 'rollout-bottleneck',
-        label: '瓶颈转移到 Rollout：每个 Prompt 需生成 G (如 16~64) 条超长 CoT (8K~32K)，自回归推理 Memory-Bound 占总步时 70%~85%',
+        label: '按 G、生成长度和有效 token/s 估算 rollout 工作量，用阶段计时定位实际瓶颈',
         weight: 22,
-        keywords: ['rollout', '推理', '70%', '80%', '85%', 'memory-bound', '长cot', '自回归', '瓶颈', '生成', 'kv cache'],
-        probe: '既然 GRPO 省了一半显存，为什么大规模训 R1 类推理模型时，工程师 80% 的精力都在死磕 Rollout 阶段？',
+        keywords: ['rollout', '推理', '长cot', '自回归', '瓶颈', '生成', 'kv cache', '吞吐', '长尾', 'token/s'],
+        probe: '给定 G、生成长度分布和实测生成速度，怎样判断一步训练被 rollout、验证器还是更新所限制？',
       },
       {
         id: 'dpo-offline',
         label: 'DPO 离线对比：无需在线 Rollout 与 Critic/RM，仅需 Policy + Ref（Ref 甚至可离线预计算 logprob），但缺乏 On-policy 探索能力',
         weight: 16,
         keywords: ['dpo', '离线', 'offline', '无需rollout', 'ref', '预计算', 'on-policy', '探索', 'sft'],
-        probe: '从 Infra 复杂度看 DPO 几乎和 SFT 一样简单（甚至可以把 Ref logprobs 离线算好）。那为什么 Reasoning 模型非要上复杂度高 10 倍的在线 GRPO？',
+        probe: '在已有离线偏好对与需要对当前策略新生成的回答打分两种情况下，训练流水线如何不同？',
       },
       {
         id: 'shared-prefix',
-        label: 'GRPO Rollout 专属优化红利：同一 Prompt 的 G 条采样完全共享 Prompt KV Cache (Radix/Prefix Caching) 且可大幅加速 Prefill',
+        label: '同一模型版本下可共享相同 prompt 的 KV 块，独立后缀仍需计算和存储',
         weight: 14,
         keywords: ['prefix', '共享', 'copy-on-write', 'radix', 'kv复用', 'batched', 'prefill'],
         probe: 'GRPO 对同一个 Prompt 一次采样 G=16 或 64 条回答，在推理引擎侧有什么天然的显存和算力优化机会？',
       },
     ],
     hints: [
-      'L1 方向提示：先算清静态显存账（PPO ~36Ψ vs GRPO ~18Ψ vs DPO ~16~18Ψ），再算时间账（Train 是 Compute-bound 高 MFU，Rollout 是长尾自回归 Memory-bound）。',
-      'L2 GRPO 算力账：假设 Prompt Batch=256，Group G=16，每条生成 8K tokens，单步就要推理生成 **32M tokens**，而反向训练只有 1 遍！Rollout 轻松吃掉 75%~85% 的端到端墙钟时间。',
-      'L3 Prefix 红利：同一组 G 条输出共享完全一样的 Prompt，开启 PagedAttention Copy-on-Write / Prefix Caching 后 Prompt 只做 1 次 Prefill、物理 KV 只存 1 份！',
+      'L1 分别列每个角色的参数量、是否训练、精度、是否复用，再看各阶段同时驻留哪些状态。',
+      'L2 256 个 prompt、G=16、每条生成 8192 tokens 时，共生成 33,554,432 tokens。墙钟占比还要知道生成与更新速率。',
+      'L3 相同 prompt 的只读 KV 块可复用，收益取决于引擎 fork/前缀缓存、放置和缓存命中。',
     ],
     followUps: [
       {
         stage: 'deepen',
-        question: '追问 1（Ref 模型优化）：在 GRPO 里我们仍然需要 Reference Model 算 KL 散度惩罚（$D_{KL}(\\pi_\\theta || \\pi_{ref})$）。如果 Actor 是 671B MoE，难不成要再常驻一套 671B 的 Ref 模型吗？工程上怎么把 Ref 模型的显存和时间开销压到最低？',
+        question: '追问 1（Ref 开销）　若 GRPO 目标含固定参考策略的 KL 项，671B 的 Ref 有哪些复用或分时方案？若该项系数为零呢？',
       },
       {
         stage: 'corner',
         question: '追问 2（DAPO / Dr.GRPO 变体）：GRPO 训练中，不同样本的生成长度从 500 到 32K 剧烈波动，如果直接在 Token 维度或 Sequence 维度做 Loss 归一化，加上 Packing 训练，Infra 在梯度累积和 Loss Mask 上容易踩什么坑？',
       },
     ],
-    referenceAnswer: `### Staff 级参考解析
+    referenceAnswer: `### 用同一套假设计显存
 
-#### 1. 三大对齐范式的系统显存与复杂度对比（模型参数量 $\\Psi$）
-| 维度 | DPO | PPO (RLHF) | GRPO / RLOO (Reasoning RL) |
-|---|---|---|---|
-| **在线驻留角色** | Actor (16Ψ) + Ref (2Ψ，可离线预算) | Actor (16Ψ) + Critic (16Ψ) + Ref (2Ψ) + RM (2Ψ) | Actor (16Ψ) + Ref (2Ψ) + 轻量 Rule Verifier |
-| **总静态显存** | ~16~18Ψ | **~36Ψ**（极易 OOM） | **~18Ψ**（直降 50%） |
-| **在线 Rollout** | 无（纯离线 SFT-like 流水线） | 有（每 Prompt 采 1 条） | **极重**（每 Prompt 采 $G=8\\sim 64$ 条长 CoT） |
-| **核心系统瓶颈** | 纯训练吞吐（Compute-bound） | 四模型显存调度 + 多阶段通信 | **长尾 Rollout 推理吞吐 (占 70%~85% 时间)** + 权重高频同步 |
+取四个独立等大模型、参数量均为 Ψ。可训练模型按 BF16 权重/梯度、FP32 主权重与两个 Adam 矩计 16Ψ 字节，冻结模型只存 BF16 权重计 2Ψ。下表是全模型状态总量，未计 rollout 副本、激活、KV、分片临时区。
 
-#### 2. 为什么 GRPO 把集群瓶颈彻底推向推理侧？
-- 训练（Actor Update + Ref Logprob）是全序列并行的 **Compute-Bound**，H100 MFU 可达 45%~55%。
-- Rollout 是逐 Token 自回归的 **Memory-Bound**，且推理模型单条 CoT 动辄 8K~32K tokens，乘上 $G=16\\sim 64$，每步生成量极其庞大；加上序列长度方差极大导致的 Straggler 空等，Rollout 成为绝对主瓶颈。
+| 方法 | 角色和工作 | 示例总量 |
+|---|---|---|
+| 经典 RLHF-PPO | Actor 和 Critic 训练，Ref 约束策略，RM 给奖励。需要采样动作并估计价值/优势 | 16Ψ+16Ψ+2Ψ+2Ψ=36Ψ。四个 70B 共 2.52 TB |
+| GRPO | 同一 prompt 采 G 个回答，用组内奖励构造优势，常见 Aᵢ=(rᵢ−组均值)/(组标准差+ε)，无需 value critic | 用规则奖励且启用冻结 Ref 时为 18Ψ。若依赖 RM 要另加其权重。组内同等奖励时该组相对奖励信号为零 |
+| 离线 DPO | 对固定 chosen/rejected 对做 teacher-forcing，用策略与冻结参考的回答 logprob 差构造偏好目标 | 16Ψ+2Ψ。固定数据、模板与 Ref 后可预计算参考 logprob，更新时只驻留策略 |
 
-#### 3. 工程关键优化点
-- **Prompt KV 零冗余共享**：同一 Prompt 的 $G$ 条轨迹在 vLLM/SGLang 内共享 Prompt 物理 KV Block（CoW / Radix Tree），Prefill 算力与 Prompt KV 显存直接缩减 $G$ 倍。
-- **Ref 模型零常驻技巧**：(1) 将 Ref 权重 Offload 到 CPU Pinned Memory，仅在每步计算 \`ref_logprob\` 时按层流式加载或短暂换入；(2) 若采用 LoRA RL，则禁用 LoRA Adapter 即可零显存直接复用同一份 Base 权重充当 Ref！`,
+PPO 可共享 actor/critic 骨干，RM 规模也可不同。优化器分片、共置/分离和分时加载决定每卡峰值。有 KL 项时，GRPO 可对新生成的轨迹批量计算冻结 Ref，再换出。仅当冻结 base 恰好等于所需 Ref 时，禁用 LoRA 才可复用它。KL 系数为零时，此项不需 Ref 前向。
+
+### 工作量与归一化
+
+256×16×8192=33,554,432 个生成 token。Prefill 可复用相同 prompt 的 KV，分叉后的 decode 仍逐 token 执行。应分开记录 rollout、奖励、ref、actor 更新、换权与组内长尾，生成量本身不能推出耗时占比。
+
+Packing 必须保留样本边界、action mask 和 group ID。按样本平均会给每条回答相同总权重。DAPO 类 token 平均以全局有效回答 token 数作分母。Dr.GRPO 的一种实现按样本数乘固定长度归一化。跨 DP 和梯度累积要聚合相应分子分母，计及 DDP 对梯度的平均，避免把不等长 micro-batch 的均值再等权平均。
+
+> 依据　DeepSeekMath（arXiv:2402.03300）、DPO（2305.18290）及 TRL v0.26.0《GRPO Trainer》。`,
   },
   {
     id: 'rl-02',
     track: 'rl',
-    title: 'RL 系统架构对决：Colocated (veRL HybridEngine) vs Disaggregated (OpenRLHF/Ray)',
+    title: 'RL 系统架构：训练与 Rollout 共置或分池，同步或异步',
     level: 'P7',
     frequency: '高频必考',
     incident: false,
     tags: ['veRL', 'OpenRLHF', 'Colocated', 'Disaggregated', 'HybridEngine', 'Ray'],
-    summary: '深度对比 RLHF/GRPO 两大主流系统架构——共置分时复用 vs 分离异步池——在 GPU 利用率、显存切换、通信同步和弹性扩展上的核心 Trade-off。',
+    summary: '比较角色的物理放置与策略版本的更新节奏，估算 GPU 空闲、换权、积压和样本陈旧。',
     contextSpecs: ['veRL 3D-HybridEngine', 'OpenRLHF / Ray', 'Colocated vs Disaggregated', 'GPU Bubble'],
-    prompt: '大规模 RL 后训练框架分化出两大架构流派：以 veRL 为代表的 **Colocated（同卡共置 + 分时复用，HybridEngine）**，以及以 OpenRLHF / StreamRL / Async-RL 为代表的 **Disaggregated（Rollout 与 Training 独立 GPU 池分离部署）**。请你从 GPU 利用率、显存切换代价、权重同步开销、同步 vs 异步算法适配以及超大规模扩展性五个维度做深度架构对比，并说明不同规模集群该如何选型。',
+    prompt: '训练和 rollout 可以分时共用一组 GPU，也可以放在独立 GPU 池。请独立考虑“物理共置/分池”和“同步/异步采样更新”，结合 veRL 或 OpenRLHF 的配置举例，比较显存、权重重分片、负载配比、异构卡和策略陈旧度。',
     rubric: [
       {
         id: 'colocated-mech',
-        label: 'Colocated (veRL) 机制：同一批 GPU 分时跑 Rollout (vLLM/SGLang) 和 Train (FSDP/Megatron)，靠 Resharding + Offload + Sleep Mode 切换，避免配比失衡气泡',
+        label: '共置时同卡分时运行，可按实际余量使用 reshard、offload、sleep',
         weight: 24,
         keywords: ['colocated', '共置', '分时', 'verl', 'hybridengine', 'offload', 'sleep', 'reshard', '无配比', '气泡'],
         probe: 'veRL 把训练和推理塞进同一批 GPU，切换阶段时显存不会爆吗？它是靠什么机制在一组卡上无缝切换两种引擎的？',
       },
       {
         id: 'disagg-mech',
-        label: 'Disaggregated (OpenRLHF/Ray) 机制：独立 Rollout GPU 池与 Train GPU 池，各自用最优并行度，靠跨节点 NCCL/RDMA 广播权重，天然支持异步流水 Overlap',
+        label: '分池时可独立选并行度和硬件，是否异步由版本/调度协议决定',
         weight: 24,
         keywords: ['disaggregated', '分离', 'openrlhf', 'ray', '独立', '异步', 'async', '流水', 'pipeline', '广播', 'broadcast'],
-        probe: '分离式架构中，如果是严格同步 On-policy RL（Train 必须等 Rollout 完，Rollout 又等 Train 更新完），会产生什么严重问题？怎么靠异步消除？',
+        probe: '严格按版本同步时，两个独立池怎样产生空闲？容许哪些重叠仍保持轨迹使用同一行为版本？',
       },
       {
         id: 'tradeoff-bubble',
-        label: '核心 Trade-off：同步算法下 Colocated 利用率更高（0 跨池互等气泡），但有切换/Offload 固定开销；超大规模/长尾严重时 Disaggregated + 异步 Off-policy 更具吞吐与扩展性',
+        label: '同一策略版本上的等待、共置切换成本、异步吞吐与数据陈旧分别计量',
         weight: 22,
         keywords: ['同步', '异步', 'on-policy', 'off-policy', '长尾', '切换开销', '扩展性', '利用率', '配比'],
-        probe: '为什么在严格同步 On-policy 下分离架构经常 GPU 闲置一半，但到了千卡级长 CoT RL 时大家又开始转向分离+异步架构？',
+        probe: '如何从卡数、阶段耗时、换权时间和队列积压测出分池是否更划算？',
       },
       {
         id: 'topo-mismatch',
-        label: '引擎并行拓扑差异：Train 偏重 FSDP/DP+PP+TP，Rollout 偏重高并发小 TP 或 Wide-EP，Colocated 需做 3D 重分片而 Disaggregated 需跨机点对多广播',
+        label: '两类放置均可需要布局转换，区分本地分片重排及跨机广播',
         weight: 16,
         keywords: ['并行度', '拓扑', 'tp', 'pp', 'fsdp', 'megatron', 'ep', '重分片', 'resharding'],
         probe: '训练和推理的最佳并行配置通常不一样（比如训用 TP4+PP2+DP8，推用 TP4×16 副本），两种架构各自怎么处理权重映射？',
       },
       {
         id: 'hetero-hw',
-        label: '异构硬件红利：Disaggregated 允许混部异构卡（如 H20/高带宽卡跑 Rollout + H100/B200 跑 Train），Colocated 必须同构',
+        label: '分池便于异构资源独立配置。比较各阶段可用内核、速度与成本',
         weight: 14,
-        keywords: ['异构', 'h20', 'h100', '混部', '成本', 'roi', '同构'],
+        keywords: ['异构', 'h20', 'h100', '成本', '卡型', '内核', '计算吞吐', '带宽', 'roi'],
         probe: '如果公司手里同时有大批便宜的高显存推理卡（如 H20/L40S）和少量 H100，哪种架构能把异构算力吃干抹净？',
       },
     ],
     hints: [
-      'L1 方向提示：核心矛盾是“严格 On-policy 同步 vs 容忍 1-step Staleness 异步”！同步选 Colocated 省互等气泡；异步/超大规模/异构卡选 Disaggregated。',
-      'L2 切换账：Colocated 每次从 Train 切 Rollout，要把 Optimizer States Offload 到 CPU、释放训练激活、唤醒推理引擎显存池、并把训练权重 Reshard 进推理引擎。',
-      'L3 分离账：Disaggregated 在同步模式下 Train 池和 Rollout 池永远一动一静（利用率 <50%）；必须配上 **One-step Off-policy / Async Streaming Rollout** 让两池同时满转，且需精细调校 Rollout:Train 卡数配比防止队列积压或饥饿。',
+      'L1 先画 GPU 放置，再画策略版本时间线。二者可以独立选择。',
+      'L2 共置切换时要核算同时存在的权重、优化器、KV 和临时缓冲，按需释放、换出或复用。',
+      'L3 分池严格串行时忙碌 GPU·秒是各角色卡数乘各自忙碌时间之和，除以总 GPU·秒即可估算利用率。',
     ],
     followUps: [
       {
@@ -143,20 +145,21 @@ export const RL_QUESTIONS = [
         question: '追问 2（超大规模同步代价）：如果采用 Disaggregated 架构，671B 模型做完一次 Train Step 后，需要把最新权重同步给 512 张 Rollout 卡，万一同步期间 Rollout 还有长尾请求没吐完怎么办？',
       },
     ],
-    referenceAnswer: `### Staff 级架构选型矩阵
+    referenceAnswer: `### 两个独立的设计决定
 
-| 对比维度 | Colocated (veRL HybridEngine) | Disaggregated (OpenRLHF / StreamRL / Async-RL) |
+共置/分池描述 GPU 放置。同步/异步描述策略何时发布、哪些样本允许训练消费。veRL 的 HybridFlow 给出共置和 3D-HybridEngine 方案，OpenRLHF 也支持 Hybrid Engine 共置与异步分池。Ray 是编排层，框架名字不足以判定架构。
+
+| 维度 | 共置、分时 | 独立资源池 |
 |---|---|---|
-| **GPU 调度方式** | 同批 GPU 分时跑 Rollout → Ref → Train | 物理拆分为 Rollout 池 + Train 池（+ 独立 Verifier 池） |
-| **同步 On-policy 利用率** | **极高**（全集群齐刷刷算 Rollout 再齐刷刷算 Train，零跨池互等） | **差**（一池干活一池发呆，必须改异步才能拉满） |
-| **异步 / 长尾抗性** | 弱（批内最慢那条 32K 轨迹卡住全集群进 Train） | **极强**（Rollout 流式源源不断吐轨迹给 Train，长尾自然跨步延续） |
-| **显存与切换开销** | 每次切换需 CPU Offload Optimizer + CuMem Sleep + Resharding（数秒~十几秒） | 零 Offload、常驻引擎，但每步需跨机网络同步参数 |
-| **异构算力与故障隔离** | 必须同构；任意单卡挂全任务受影响 | 支持 **H20/高带宽卡 Rollout + H100 Train**；Rollout 实例可独立无感重启 |
+| 容量与换权 | 同一批卡可轮流用于生成和训练，需预算 sleep/offload、重分片和转换峰值 | 两组可各自常驻，分别选择 TP/PP/EP 和卡型。发布版本要传输到 rollout 副本 |
+| 同步更新 | 一轮所有样本都可绑定同一旧策略，切换和最后几条长轨迹会占用墙钟 | 简化为两段严格串行时，忙碌占比为 (R·tᵣ+T·tₜ)/[(R+T)(tᵣ+tₜ)]。R、T 为两池卡数，各池内部先假设全忙 |
+| 流水和配比 | 分时或给部分角色留出资源均可，收益受可用空间约束 | 产训可重叠，稳态受较慢阶段限制。用样本生产/消费率、队列长度、策略版本差做背压 |
 
-#### 选型最佳实践
-- **中小规模（8~256 卡）或要求严格 On-policy 数学对齐（如算法探索期）**：首选 **Colocated (veRL)**，省去 P:D/R:T 节点配比调优，单卡 ROI 最高。
-- **超大规模（512~4096 卡）、长 CoT (16K~64K) 或 Agentic 多轮环境交互 RL**：首选 **Disaggregated + 半异步 (1-step Off-policy / Partial Rollout)**，将环境 IO 等待与 Rollout 长尾彻底与昂贵的训练池解耦。
-- **Ray 控制面防炸**：绝不把大张量/KV 经由 Ray Driver 或 Object Store 传回中心节点；Control Plane 只传轻量元数据和指针，Data Plane 全部走 **GPU-to-GPU NCCL / RDMA 分布式直连**。`,
+**选型**。在相同训练目标和有效样本数下比较 GPU·小时、奖励/质量、换权时长及两池空闲。严格同步并且换相便宜时，共置有吸引力。长工具调用、异构硬件、负载变化或可控的策略滞后可能使分池更合适。异构时分别测训练卡的更新速度与 rollout 卡的显存、带宽、所需精度内核和达标成本。
+
+**控制面追问**。将大对象按 worker 分片、采用对象引用或直接数据通道、限制在途对象数和引用寿命。driver 避免集中收集所有长轨迹。**换权追问**。先停止接纳旧版本新请求，排空、分版本双缓冲或按约定暂停并重建状态。全部目标 rank 就绪后再发布。严格同步的训练批检查行为版本，异步方案额外记录实际行为 logprob 并设消费边界。
+
+> 依据　HybridFlow（arXiv:2409.19256）及 OpenRLHF《Hybrid Engine》《Async Training & Partial Rollout》。`,
   },
   {
     id: 'rl-03',
@@ -166,77 +169,71 @@ export const RL_QUESTIONS = [
     frequency: '高频必考',
     incident: false,
     tags: ['Weight Sync', 'Resharding', 'CUDA IPC', 'NCCL Broadcast', 'FP8 Rollout'],
-    summary: '深入训练引擎 (FSDP/Megatron) 到推理引擎 (vLLM/SGLang) 之间百 GB 级权重秒级同步的拓扑映射、零冗余通信与量化对齐。',
-    contextSpecs: ['Megatron/FSDP → vLLM/SGLang', '3D-HybridEngine', 'CUDA IPC / NCCL Bucket', 'Sub-second Sync'],
-    prompt: '在 RL 迭代循环中，每完成一次 Actor 参数更新，就必须立刻把最新权重同步给推理引擎（vLLM/SGLang）开始下一轮 Rollout。对于 72B 甚至 671B 模型，如果每次同步耗时 30 秒，整个训练吞吐就毁了。请详述：(1) 训练与推理并行拓扑不一致时如何做高效 Weight Resharding；(2) 同卡共置与跨机分离场景下分别用什么底层传输机制（CUDA IPC / NCCL / Bucket 化）做到亚秒~秒级同步；(3) 如果 Train 用 BF16 而 Rollout 用 FP8，权重同步怎么处理？',
+    summary: '按训练/推理分片映射设计权重发布，估算链路下界并验证布局、缓存与策略版本。',
+    contextSpecs: ['Megatron/FSDP → vLLM/SGLang', 'TP4/PP2/DP8 → 16×TP4', 'CUDA IPC / NCCL', 'BF16 → FP8'],
+    prompt: 'Actor 更新后，rollout 引擎要按约定版本接收训练权重。以 72B 为例，设计同卡共置及跨机分离的权重同步，说明不同 TP/PP/DP 布局如何映射、如何控制转换峰值、如何估算时间，以及 BF16 训练到 FP8 推理时如何保证可验证的一致性。',
     rubric: [
       {
         id: 'topo-reshard',
-        label: '3D 拓扑对齐与零冗余重分片 (3D-HybridEngine)：通过微调 TP/PP 映射尽量把重分片局限在机内 NVLink (AllGather micro-DP 组)，避免跨机搬运',
+        label: '按全局层、张量分片与物理拓扑规划来源和去向，估计必要的跨机流量',
         weight: 24,
         keywords: ['reshard', '重分片', '3d-hybridengine', 'tp', 'pp', 'dp', 'nvlink', '机内', 'allgather', '拓扑'],
-        probe: '假设训练用 TP=4, PP=2, DP=8 (64 卡)，而推理每实例只需 TP=4 (16 个独立副本)。如果粗暴把全模型汇总到 Rank 0 再广播，会出什么问题？3D-HybridEngine 是怎么把同步完全留在本地小通信域的？',
+        probe: '训练 TP4/PP2/DP8 转成 16 个 TP4 推理副本时，哪几块参数本地已有？要从谁取其余层？',
       },
       {
         id: 'bucket-stream',
-        label: 'Bucket 化流式转换 (Streaming Bucket / Flattened Buffer)：避免一次性物化完整 72B 未分片权重导致 OOM，按层或固定 512MB~2GB 桶流水 AllGather/Broadcast + 名称映射 (QKV/GateUp 融合)',
+        label: '有界 bucket 流式重排 QKV/GateUp/专家布局，控制显存，完整校验后发布',
         weight: 22,
-        keywords: ['bucket', '桶', '流式', 'oom', '逐层', 'layer', 'qkv', '融合', '命名映射', 'buffer'],
+        keywords: ['bucket', '桶', '流式', '缓冲', '重排', 'qkv', 'gate/up', '转换', 'oom', '映射'],
         probe: 'FSDP/Megatron 的权重切分格式、以及 QKV/GateUp 投影矩阵拼接方式和 vLLM 不一样。如果先一次性把 72B 参数全部 AllGather 拼好再喂给 vLLM，会发生什么灾难？怎么解决？',
       },
       {
         id: 'ipc-nccl',
-        label: '传输通道选型：同卡共置优先同进程零拷贝指针 / CUDA IPC Handle；跨进程/跨机用专用 NCCL ProcessGroup 广播（避开 Ray Object Store 与 CPU 序列化）',
+        label: '区分同进程拷贝、同机 CUDA IPC 与跨机 NCCL 等传输，解释同步和生命周期',
         weight: 20,
         keywords: ['cuda ipc', 'nccl', 'broadcast', '零拷贝', '指针', '同进程', 'rdma', 'ray', '显存拷贝'],
         probe: '同机共置时，如果训练和推理跑在不同进程（比如 Ray Actor），不用磁盘也不用 CPU 拷贝，怎么直接 GPU-to-GPU 传权重？',
       },
       {
         id: 'fp8-quant-sync',
-        label: 'BF16 Train → FP8 Rollout 在线量化同步：在发送端（或 Bucket 传输前）在线融合量化为 FP8 + Scale，通信量直接减半并加速 Rollout 2×',
+        label: '比较源侧/目标侧量化的字节、scale 布局和行为策略误差',
         weight: 18,
         keywords: ['fp8', '在线量化', 'quant', '减半', 'scale', '精度', 'mismatch', '重要性采样'],
         probe: '如果训练是 BF16、推理开 FP8，应该先传 BF16 再在推理侧量化，还是先量化再传？这会引入什么算法层面的副作用？',
       },
       {
         id: 'lora-delta',
-        label: '增量/LoRA/稀疏同步视角：若采用 LoRA RL，每步只需同步几十 MB Adapter 权重，耗时 <10ms',
+        label: '固定基座时可只发布变动的 adapter 和相关状态，按实际字节与链路估时',
         weight: 16,
         keywords: ['lora', '增量', 'delta', 'adapter', '毫秒', '轻量'],
-        probe: '相比全参同步，如果业务用 LoRA 做 RL，权重同步耗时能压缩到什么量级？',
+        probe: '哪些条件下仅传 LoRA 参数即可完整恢复新策略？如何估算同步量与耗时？',
       },
     ],
     hints: [
       'L1 方向提示：记住三个关键词——**局部通信域对齐 (3D-HybridEngine)**、**按 Bucket 流式转换防 OOM**、**GPU 直连通道 (同进程指针/CUDA IPC/NCCL Broadcast)**。',
-      'L2 显存防爆技巧：FSDP 参数在同步时不能全模型 \`summon_full_params\`，必须按 Layer 或按固定大小（如 1GB Bucket）逐块 AllGather -> 切分/重排为 vLLM QKV 格式 -> 写入 vLLM 权重 Buffer -> 立即释放临时缓冲！',
-      'L3 速度基准：72B BF16 = 144GB。按机内 NVLink (400GB/s+) 做局部 AllGather 理论上只需 **0.4~1.5 秒**；若跨机用 400Gbps IB 广播且做 FP8 压缩（72GB），每节点 8 卡并发也在 **1~2 秒**内完成！',
+      'L2 按内存余量定 bucket，流水完成收集、布局转换、传输和写入。校验完成后再对请求开放新版本。',
+      'L3 72B BF16 的逻辑权重约 144 GB。如果全部跨单条 400 Gb/s 链路，理想下界 2.88 秒。多个接收端的时间还取决于复制拓扑。',
     ],
     followUps: [
       {
         stage: 'deepen',
-        question: '追问 1（CUDA Graph 与权重指针）：vLLM/SGLang 开启了 CUDA Graph 加速 Decode。如果权重同步时你重新 `malloc` 了新的权重 Tensor 替换旧引用，CUDA Graph 会立刻失效甚至读到野指针！工程上必须遵守什么铁律？',
+        question: '追问 1（CUDA Graph）　若 replay 引用了旧参数地址，更新权重时怎样避免在途读写竞争？更换地址后怎样恢复有效图？',
       },
       {
         stage: 'corner',
         question: '追问 2（异步流式更新）：在 Disaggregated 异步 RL 中，Rollout 池正在生成半截的 Trajectory，此时新权重同步过来覆盖了旧权重，一条 Trajectory 前半段是 $\\pi_{t-1}$ 生的、后半段是 $\\pi_t$ 生的，工程和算法上怎么处理？',
       },
     ],
-    referenceAnswer: `### Staff 级权重同步加速方案
+    referenceAnswer: `### 为每个目标分片列出来源
 
-#### 1. 并行拓扑对齐（veRL 3D-HybridEngine 思想）
-- 设训练并行度为 \`(TP_t, PP_t, DP_t)\`，推理为 \`(TP_g, DP_g)\`（通常 \`PP_g = 1\`，且 \`TP_g\` 往往较小以换高并发）。
-- 若直接从全局重建再广播，会产生大量跨机拥塞。
-- **最优编排**：构造推理与训练共享的微数据并行子组（Micro-DP Group，尽量落在**同一机内 NVLink 域**），每个推理 Rank 只需在极小范围内执行一次 \`AllGather\` 即可凑齐所需分片，彻底消除跨机多余通信，实现 **Zero Redundancy**。
+以 TP4/PP2/DP8 → 16 个 TP4 副本为例。训练时一个 PP stage 只有部分层，同一 TP 号只持有对应切片。若 DP 参数也分片，先在其分片域内补齐所需范围。推理副本的每个 TP rank 都要覆盖全层。若单个训练副本的 8 卡位于同机且训练权重在 DP 间复制，两个 PP stage 可按相同 TP rank 互换缺失的层，在机内组成两个完整 TP4 rollout 副本。若 PP 横跨节点，需按实际放置选择来源。按全局层号、Q/K/V 与 GQA head 顺序、Gate/Up、专家编号和量化布局重排，逐桶验证形状、元素和版本。
 
-#### 2. Bucket 化流式转换（防 OOM + 吃满带宽）
-1. 绝不一次性把完整未分片 72B/671B 模型物化到 GPU 显存，也绝不走 CPU/Ray Object Store；
-2. 将所有参数按 \`512MB ~ 2GB\` 分成连续 **Flat Bucket**，逐 Bucket 执行：\`训练侧 AllGather/提取 -> 算子布局映射（Megatron/FSDP interleaved QKV/GateUp 转 vLLM packed layout）-> 在线量化 (若启用 FP8 Rollout) -> 传输写入 -> 释放临时缓冲\`；
-3. **In-place 写入铁律**：必须使用 \`param.data.copy_(new_weight)\` **原地覆写**推理引擎已绑定的权重显存地址，绝不更改 Tensor 指针，以确保 vLLM/SGLang 预先捕获的 **CUDA Graph 地址完全有效**！
+- **有界传输**。桶大小由空闲显存、带宽和启动延迟决定。把接收、转换、传下一桶重叠，限制在途缓冲数。同进程且布局兼容时可复用或拷贝。同机 CUDA IPC 可共享合格分配的句柄，需保证所有者生命周期和流同步。跨机可复用 NCCL 通信组或 RDMA 传输。
+- **时间下界**。72B BF16 主体 144 GB，在单条 400 Gb/s 链路上全量传一次至少 2.88 秒。若源端先量化到 FP8，载荷约 72 GB 外加 scales，下界接近 1.44 秒。多 rail 和分层广播按最忙源、目标链路与复制字节重新算。还要加转换和提交时间。若先传 BF16 可由目标按本地 kernel 生成正确的块 scale。
+- **原子发布**。等待在途读取结束再写原地址，或为版本准备独立缓冲及其匹配的图。所有 rank 就绪后统一切版本。更换捕获地址时重捕获或使用后端支持的图更新。旧权重产生的 KV 要按版本隔离，策略变化后续写通常需要用新权重重算前缀。版本标签可追溯，单靠打标签不能修复半更新。
+- **验证**。固定 token 做 teacher-forced logprob 对照，并保存行为策略的实际采样概率。LoRA 仅在两边 base、配置、量化格式及合并状态一致时可只发更新的 adapter（及其他已训练参数），用真实可训练参数量乘元素字节估算。
 
-#### 3. 传输通路选型
-- **Colocated 同进程**：直接 GPU 显存原地拷贝 / 局部 NVLink AllGather（72B < 1.5s）。
-- **Colocated 跨进程**：通过 **CUDA IPC (\`cudaIpcGetMemHandle\`)** 传递 GPU 显存句柄零拷贝共享。
-- **Disaggregated 跨机**：训练侧 Rank 0 组与推理侧建立持久化 **NCCL Broadcast/P2P 通信组**（多 NIC 并发流水传输），FP8 压缩可再砍半网络流量；若为异步架构，可在 Request 级打 \`policy_version\` 标签或采用 **Pause-Update-Resume** 机制保证单步权重切换仅暂停几百毫秒。`,
+> 依据　HybridFlow（arXiv:2409.19256）及 NVIDIA CUDA Programming Guide 的 IPC / CUDA Graphs 章节。`,
   },
   {
     id: 'rl-04',
@@ -247,19 +244,19 @@ export const RL_QUESTIONS = [
     incident: false,
     tags: ['长CoT', 'Straggler', 'Partial Rollout', 'Async RL', 'Staleness'],
     summary: '解决 o1/R1 类 Reasoning RL 中“95% 样本 2K 结束，5% 样本吐到 32K 拖垮全集群”的致命长尾难题。',
-    contextSpecs: ['CoT 1K ~ 64K Tokens', '95% GPU Idle Tail', 'Partial Rollout', 'Off-policy Staleness'],
+    contextSpecs: ['CoT 1K–32K tokens', '同步批尾部空闲', 'Partial rollout', '策略版本与行为概率'],
     prompt: '【高频真实痛点】你在训练一个类似 DeepSeek-R1 / OpenAI o1 的长思维链（最大长度 32K）GRPO 模型。监控发现 Rollout 阶段前 20 秒所有 GPU 满载跑得很欢，但后面整整 100 秒里，95% 的样本已经生成完毕，整个 512 卡集群全在干等最后寥寥几条 32K 的超长样本吐完，导致端到端 GPU 利用率跌破 25%！请给出从纯同步优化到半异步/全异步的多层系统解法。',
     rubric: [
       {
         id: 'straggler-root',
-        label: '精准诊断根因：同步 Barrier 导致长尾木桶效应（批量末尾 Batch Size 骤降为 1~4，退化为极端 Memory-Bound，算力利用率 <1%）',
+        label: '以活跃序列、逐 token 延迟和 GPU·秒识别同步屏障和自回归长尾',
         weight: 18,
-        keywords: ['木桶', 'barrier', '长尾', 'straggler', 'batch size', '骤降', 'memory-bound', '空等', '同步点'],
-        probe: '为什么最后那 5% 的 32K 样本不仅仅是因为长，还会显得“越到后面吐得越慢/越浪费卡”？',
+        keywords: ['屏障', '同步更新', 'barrier', '批尾', '活跃序列', '尾部', '等待 gpu', 'active sequences', 'straggler', '长尾'],
+        probe: '怎样区分集群有效 token/s 下降与单个长请求 ITL 上升？',
       },
       {
         id: 'partial-rollout',
-        label: 'Partial Rollout / Trajectory Interruption（部分生成与跨步续写，如 Kimi k1.5 / AReaL）：达到时间/步数预算强制截断保存状态，下一轮继续生成或直接进入 Replay Buffer',
+        label: '暂停并保存 token/采样状态，区分同版本续写与更新后跨版本轨迹',
         weight: 26,
         keywords: ['partial rollout', '截断', 'interruption', '续写', 'pause', 'kimi', 'areal', '跨步', 'checkpoint', '挂起'],
         probe: '如果到了时间上限，最后那 5% 还没生成完，直接暴力丢弃会破坏长度分布（惩罚长思考）。Kimi k1.5 / AReaL 的 Partial Rollout 是怎么做到“既不丢弃长思考，又不空等”的？',
@@ -273,23 +270,23 @@ export const RL_QUESTIONS = [
       },
       {
         id: 'staleness-control',
-        label: 'Off-policy Staleness 控制：限制最大版本差 (max_staleness ≤ 1~2 步)、重要性采样比率 Clip (IS Clipping / IcePop) 或重算 Old Logprob',
+        label: '保存行为概率和策略版本，限制陈旧、测量 ratio 分布，说明截断或过滤的偏差',
         weight: 18,
         keywords: ['staleness', '陈旧', '版本差', 'importance sampling', '重要性采样', 'clip', 'ppo clip', 'off-policy', '策略偏移'],
-        probe: '如果一条轨迹是用 3 个版本前的旧策略生成的，直接拿来算 GRPO 梯度会导致策略崩塌，工程和算法上怎么控 Staleness？',
+        probe: '滞后多个版本的轨迹应该记录什么概率？用更新后的训练引擎重算能恢复生成时的行为概率吗？',
       },
       {
         id: 'sync-tricks',
-        label: '同步框架内缓解手段：动态路由平衡各实例剩余长度、过采样 (Over-sampling) 提前凑满有效 Batch、早停/重复循环检测（Repetition Loop Killer）',
+        label: '同策略动态分发和严格等价的投机验证。识别过采样择快、提前截断造成的选择偏差',
         weight: 16,
         keywords: ['过采样', 'over-sampling', 'oversampling', '重复', '死循环', 'repetition', '动态', '负载均衡', '投机采样', 'speculative'],
-        probe: '假设算法团队死活不允许任何 Off-policy（必须 100% 严格 On-policy），在不改算法的前提下，工程上有哪些立竿见影的加速手段？',
+        probe: '若必须保留同一行为策略和原有样本分布，哪些调度优化可用，哪些停止规则会改变数据？',
       },
     ],
     hints: [
-      'L1 方向提示：从“不改算法的同步优化”到“微调算法的 Partial Rollout & One-step Async”分层作答，这最能体现 Staff Infra 工程师与算法 Co-design 的视野！',
-      'L2 同步绝招：(1) 检测死循环重复复读机提前截断；(2) 用长度预测做 Prompt 调度均衡各实例；(3) 对末尾低 Batch 长尾动态开启 **Speculative Decoding / MTP** 把单条长尾生成提速 2~3×！',
-      'L3 终极解法 (**Partial Rollout + Async**)：Rollout 池永不停歇流式填充新 Prompt；或到固定 Token 预算后暂停未完轨迹，把已生成前缀存入 Buffer，下个 Step 权更新后直接利用 Prefix Cache 续写剩余部分（注意记录每段生成的权重版本号或用 IS 修正）。',
+      'L1 逐实例记录 active sequences、tokens/s、ITL 和尾部等待 GPU·秒，再决定是调度不均还是单轨迹过长。',
+      'L2 在预定样本集合内动态分发，或使用保持行为分布的投机验证。丢弃慢样本与额外早停都会改变数据。',
+      'L3 跨步保存 token IDs、行为概率、奖励/环境状态与版本。同版本可校验 KV 后续写。换权后重算前缀或固定旧副本。',
     ],
     followUps: [
       {
@@ -298,30 +295,18 @@ export const RL_QUESTIONS = [
       },
       {
         stage: 'corner',
-        question: '追问 2（末尾长尾开投机采样）：前面聊过推理里大 Batch 不能开投机采样，但在同步 Rollout 尾声 Batch 掉到 < 16 时，动态开启 MTP/EAGLE 投机采样能把尾巴砍短一半！实现这种“动态开关投机采样”需要引擎做什么配合？',
+        question: '追问 2（尾部投机）　如何按活跃 batch、接受长度和目标模型验证时间决策是否启用 MTP/EAGLE，同时保持原采样分布？',
       },
     ],
-    referenceAnswer: `### Principal 级长 CoT Rollout 长尾治理架构
+    referenceAnswer: `### 区分批尾空闲和慢请求自身延迟
 
-#### 1. 为什么长尾会造成雪崩级算力浪费？
-- 同步 RL 在 Rollout 结束处存在全局 **Synchronization Barrier**。
-- 当 95% 短样本结束后，剩余 5% 的 32K 样本把推理引擎的有效 Batch 从 512 骤降到 5~10，彻底跌入 Roofline 极低利用率区；同时其他已完成节点的全部 GPU 处于 0% 算力空转，导致有效吞吐跌至 < 25%。
+同步更新要等指定采样组完成。批尾有些实例无工作，其余实例能共享权重读取的 token 也变少。整体 token/s 通常下降，但单请求 TPOT 是否变慢要看其历史 KV 长度和 kernel。按实例记录 active sequences、ITL、最晚完成时间与等待 GPU·秒。
 
-#### 2. 四层递进治理方案
+1. **保持同一行为策略**。在预先选定的样本内用全局队列动态分派，长任务尽早开跑。低活跃 batch 若可用严格验证的投机采样，比较接受长度、verify 成本和 RNG/采样器语义。原样本都已分出后，动态调度无法缩短最后一条轨迹的串行依赖。只收最快的 G 条会偏向短回答，也会改变 GRPO 组内基准。额外早停需要定义奖励与截断语义。
+2. **Partial rollout**。在预算边界暂停，保存 token IDs、采样/RNG 状态、已发生动作的行为 logprob、策略版本及工具/奖励状态。若同版本续写，可复用兼容 KV 或按相同前缀重算。若换了权重，应重算前缀 KV 或在旧副本完成。后续动作由新版本产生时应逐段记录。只有已满足奖励与优势定义的组才能直接用于原 GRPO 目标。
+3. **异步分池**。完成的轨迹放入有界队列，按同 prompt 的组聚合并限制最大滞后。监控版本差、完成长度/奖励分布、重要性比值和有效样本量。训练可选择滞后界限与截断校正。过滤可能选择性丢掉长样本，截断引入偏差，PPO clip 也不保证无偏。比较同一奖励预算下的训练质量和端到端有效 token/s。
 
-1. **Level 1：零算法侵入（严格 On-policy 提效）**
-   - **长尾负载均衡（Rollout Dispatch）**：不要静态把 Prompt 均分给各 vLLM 实例，改用**全局共享队列动态拉取**（Work Stealing），闲置实例自动认领新 Prompt；
-   - **长尾阶段动态开启投机采样 (MTP / N-gram / EAGLE)**：当活跃请求数低于阈值（如 \`B < 32\`）时自动切换投机采样，把最慢尾巴的 TPOT 压缩 2×；
-   - **早停复读机**：检测严重 N-gram 无限重复输出的坏样本提前熔断（需与算法对齐 Reward）。
-   > ⚠️ **反模式警示**：绝对不能“Over-sample 后粗暴丢弃未完成的长样本”——这会引入严重的 **Short-Response Selection Bias（长度截断偏置）**，导致模型再也学不会深度长思考！
-
-2. **Level 2：Partial Rollout（Kimi k1.5 / AReaL 范式）**
-   - 每个 Rollout 阶段只允许生成固定窗口（例如 4K/8K tokens 或固定时间预算）；
-   - 到点后尚未吐出 EOS 的长轨迹**不丢弃**，而是将已生成的 Token 序列挂起存入 Replay Buffer；下一轮权重更新后，把挂起的半截序列作为 Prompt 继续续写，直至完成再送入训练（保证长思考分布完整无偏）。
-
-3. **Level 3：解耦式半异步 / 全异步 RL（StreamRL / AReaL / Async-GRPO）**
-   - 分离 Rollout 池与 Train 池，Rollout 引擎保持 **Continuous Batching 100% 满载**永不空等，轨迹完成后流式推入异步队列，凑满一个 Global Train Batch 即触发训练，并定期异步推送最新权重。
-   - **Staleness 防护**：给每条轨迹标记策略版本差 $\\Delta v = v_{train} - v_{gen}$，丢弃超过 \`max_staleness\`（如 2~4 步）的过时样本，并用 **Importance Sampling Clipping (PPO/GRPO-Clip)** 保障策略更新稳定性。`,
+> 依据　Kimi k1.5（arXiv:2501.12599）、AReaL（2505.24298）和 veRL《Rollout Correction》。`,
   },
   {
     id: 'rl-05',
@@ -331,9 +316,9 @@ export const RL_QUESTIONS = [
     frequency: '高频',
     incident: false,
     tags: ['Sleep Mode', 'CuMem', 'CUDA VMM', 'CPU Offload', '显存碎片'],
-    summary: '揭秘同一张 GPU 上同时挂载训练引擎与推理引擎不 OOM 的底层机制：为什么 empty_cache 不够，必须上 CUDA VMM 物理页解绑？',
+    summary: '区分活跃显存、分配器缓存与 CUDA 虚拟地址，核算 sleep/offload 的 GPU 峰值、主机容量和传输时间。',
     contextSpecs: ['vLLM Sleep Level 1/2', 'cuMemUnmap / VMM', 'Pinned Memory Offload', 'CUDA Graph 保留'],
-    prompt: '在 Colocated（共置）RL 框架中，同一张 80GB H100 上既初始化了 PyTorch FSDP/Megatron 训练引擎，又初始化了 vLLM/SGLang 推理引擎。很多工程师自己写脚本时发现：哪怕 Rollout 完调了 `torch.cuda.empty_cache()`，训练还是立刻 OOM，或者反过来切回推理时 CUDA Graph 全部报错失效。请深入 CUDA 显存分配底层，解释为什么 `empty_cache()` 不够，以及现代引擎的 **Sleep Mode (基于 CUDA VMM / CuMem)** 和 **CPU Offload** 是怎么实现零碎片无缝显存腾挪的？',
+    prompt: '同一张 80 GB H100 分时运行训练引擎与 vLLM。rollout 后即使调用 torch.cuda.empty_cache()，训练也可能 OOM。解释 CUDA VMM 的地址保留与物理分配、vLLM 两个 sleep level、优化器 offload 和 CUDA Graph 恢复各自需要哪些条件。',
     rubric: [
       {
         id: 'empty-cache-limit',
@@ -344,37 +329,37 @@ export const RL_QUESTIONS = [
       },
       {
         id: 'cuda-vmm',
-        label: 'CUDA Virtual Memory Management (CuMem / cuMemUnmap)：解绑物理显存页 (Physical Allocation) 归还 GPU，但保留虚拟地址空间 (VA) 映射句柄！',
+        label: 'CUDA VMM 可保留 VA，解除映射并释放物理 allocation 的引用。唤醒要重新映射、设访问权限',
         weight: 28,
         keywords: ['cumem', 'vmm', '虚拟地址', '物理显存', 'unmap', 'map', '解绑', '保留地址', 'va', 'virtual memory'],
-        probe: '如果把 vLLM 的 KV Cache 和权重直接 `free` 掉，下次唤醒时重新 `malloc` 虚拟地址变了，CUDA Graph 就全废了。CUDA VMM (CuMem) 是怎么做到“释放 99% 物理显存，但虚拟指针地址纹丝不动”的？',
+        probe: '怎样在保留 CUDA Graph 所用虚拟地址的同时回收底层物理显存？重新映射之后还要恢复什么？',
       },
       {
         id: 'sleep-levels',
-        label: 'vLLM Sleep Mode Level 1 (权重 Offload 到 CPU，丢弃 KV 物理页) vs Level 2 (权重和 KV 物理页全丢弃，唤醒后直接从训练引擎覆写同步权重)',
+        label: 'vLLM v0.10.2 的 L1/L2 都丢 KV。L1 备份权重，L2 丢权重但可保存模型 buffers',
         weight: 22,
         keywords: ['sleep', 'level 1', 'level 2', 'offload', '丢弃', 'discard', '唤醒', 'wakeup', '覆写'],
-        probe: 'vLLM 的 Sleep Mode 分 Level 1 和 Level 2。在 RL 训练场景里，为什么更推荐用 Level 2（直接丢弃推理权重物理页，根本不往 CPU 拷）？',
+        probe: '再次运行同一模型与准备接收一版新权重时，两个 sleep level 各有何代价？',
       },
       {
         id: 'train-offload',
-        label: '训练侧显存腾挪：Rollout 前将 FP32 Optimizer States (占 12Ψ 最大头) 和 Param/Grad 异步 Offload 到 CPU Pinned Memory',
+        label: '区分 Adam m/v 与 FP32 主权重，按需 offload 本地分片',
         weight: 16,
-        keywords: ['optimizer', '12', 'cpu', 'pinned', 'offload', '异步', 'pcie', '训练侧', '腾出'],
+        keywords: ['主权重', 'adam', 'optimizer', 'offload', '分片', 'pinned', 'pcie', '训练侧'],
         probe: '反过来，在训练完要切回 Rollout 之前，训练引擎自己把显存占满了，推理没地方放 KV Cache，训练侧需要 Offload 哪些大头？',
       },
       {
         id: 'pcie-perf',
-        label: 'PCIe 带宽瓶颈与主机内存容量估算：72B 优化器高达 ~860GB CPU RAM，需大内存宿主机 + Pinned Memory + 多卡并发 D2H/H2D',
+        label: '按本机拥有的状态、暂存和共享 PCIe/NUMA 带宽估算 Host 峰值及换相时间',
         weight: 12,
         keywords: ['pcie', '主机内存', 'host', 'ram', 'pinned', 'numa', '带宽', 'oom'],
         probe: 'Offload 时很多人忽略了 Host CPU 内存也会 OOM！8 卡跑 72B 时主机内存至少要配多大，D2H/H2D 传输怎么提速？',
       },
     ],
     hints: [
-      'L1 方向提示：核心黑科技是 **CUDA VMM (`cuMemAddressReserve` + `cuMemCreate` + `cuMemMap` / `cuMemUnmap`)**，实现了“虚拟地址”与“物理显存”的彻底解耦！',
-      'L2 Sleep Level 2 洞察：RL 每一轮训练结束后权重都会变，所以 Rollout 完根本不需要费劲把旧推理权重拷贝到 CPU（Level 1）；直接 **Level 2 彻底 `cuMemUnmap` + `cuMemRelease` 物理页**，下轮唤醒时重新 `cuMemMap` 物理页并由训练引擎直接 Weight Sync 灌入新权重，既省 Host 内存又省 PCIe 拷贝时间！',
-      'L3 保持 CUDA Graph：因为虚拟地址区间（VA）始终保持 Reserved 未释放，重新 Map 新物理页到同一 VA 后，之前录制的所有 CUDA Graph 指针全部 100% 合法，唤醒即可直接满速跑！',
+      'L1 empty_cache 只能归还当前分配器可释放的缓存。查看活跃张量、图池和其他进程的占用。',
+      'L2 vLLM v0.10.2 的 Level 2 丢弃模型权重和 KV，但会保留部分模型 buffers 到 CPU。新权重写入完成后才可接请求。',
+      'L3 保留 VA 只是重放的一个条件，同时确认权重内容、访问权限、形状、工作区和 stream 同步。',
     ],
     followUps: [
       {
@@ -386,24 +371,19 @@ export const RL_QUESTIONS = [
         question: '追问 2（显存碎片与 PyTorch Expandable Segments）：即使把大头都释放了，PyTorch 训练和推理反复交替几百步后，为什么偶尔还是会报 `CUDA out of memory (tried to allocate 2GB, 15GB reserved but unallocated)`？怎么治？',
       },
     ],
-    referenceAnswer: `### Staff 级底层显存共存机制
+    referenceAnswer: `### 地址还在，不等于内容还在
 
-#### 1. 为什么 \`torch.cuda.empty_cache()\` 远远不够？
-- \`empty_cache()\` 只能回收 PyTorch Caching Allocator 中**已经没有 Tensor 引用**的空闲缓存块。
-- 推理引擎（vLLM/SGLang）预先占用的巨量 **KV Cache Pool**、模型权重张量以及绑定了固定显存指针的 **CUDA Graph** 全部处于被引用状态，\`empty_cache()\` 动不了分毫；若直接 \`del\` 销毁重建，冷启动初始化和重录 CUDA Graph 耗时动辄几十秒。
+- \`torch.cuda.empty_cache()\` 释放当前 PyTorch allocator 可归还的空闲缓存。被权重、KV 池或图引用的活跃分配及其他进程的私有池，需由各自所有者管理。先区分 allocated、reserved、驱动空闲及其他进程用量。
+- CUDA VMM 可用 \`cuMemAddressReserve\` 保留 VA。先等待在途使用结束，再 unmap 并释放物理 allocation 的引用。最后一个映射和句柄释放后，物理资源才能回收。唤醒时重新分配、映射回原 VA、设置访问权限，并恢复内容。图重放还依赖已捕获的地址、形状、缓冲和同步关系。
+- **vLLM v0.10.2**。Level 1 把权重备份到 CPU，丢弃 KV。Level 2 丢弃旧权重与 KV，模型 buffers（例如 RoPE scaling tensors）仍可备份到 CPU。Level 2 适合即将加载新权重的场景。恢复必要 buffers、完成全 rank 同一版本换权，重算或作废旧前缀后才继续生成。
 
-#### 2. 核心黑科技：CUDA VMM (CuMem) + Sleep Mode
-- 利用 CUDA Driver API 的虚拟内存管理将 **虚拟地址 (VA)** 与 **物理显存句柄 (Physical Handle)** 解耦：
-  - 初始化时用 \`cuMemAddressReserve\` 锁死一段固定 VA 区间，并挂接物理页；
-  - **Sleep（休眠）**：调用 \`cuMemUnmap\` + \`cuMemRelease\` 释放物理显存页归还给 GPU（供训练引擎使用），但**保留虚拟地址映射表不动**！
-  - **Wake Up（唤醒）**：重新向驱动申请物理页并用 \`cuMemMap\` 挂回**完全相同的虚拟地址**！所有 KV 池指针与 **CUDA Graph 零重录、毫秒级复活**。
-- **Sleep Level 1 vs Level 2**：
-  - **Level 1**：把权重拷到 CPU 备份，KV 物理页直接丢弃（适合模型权重不变的休眠场景）；
-  - **Level 2（RL 首选）**：因为训练完权重反正会更新，直接将**旧推理权重和 KV 物理页全部原地丢弃**（零 D2H 拷贝、零 CPU RAM 占用），唤醒后先映射权重页接收训练引擎 Weight Sync，再映射 KV 页开始 Rollout！
+### Host 空间和换相时间
 
-#### 3. 训练侧 Offload 与防碎片实践
-- 训练完成后，将最大的 **FP32 Optimizer States (12Ψ)** 和必要参数异步拷贝到 **Pinned Host Memory**（注意绑定对应 NUMA 节点，单机 8 卡跑大模型建议配 ≥ 1~2TB Host RAM）；
-- 开启 \`PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True\`（底层同样基于 CUDA VMM 实现动态段扩展），根治多轮切换后的虚拟块碎片化 OOM。`,
+Adam 的两个 FP32 矩为 8Ψ 字节，若还换出 FP32 master weight 则合计 12Ψ。72B 全模型合计 864 GB。单机需求取决于该机持有的分片、复制和同时在途的 pinned staging，需计主机其他进程。每卡 40 GB、单向实测带宽 50 GB/s，单卡 D2H 理想 **0.8 秒**。8 卡各有独立 50 GB/s 且主机能同时写 400 GB/s 时，整机搬 320 GB 也是 0.8 秒。共用 50 GB/s 瓶颈时则至少 **6.4 秒**。唤回还要计 H2D。
+
+反复切换 OOM 时检查 memory snapshot、活跃引用、图池、碎片和 allocator 外分配。对可变大小造成的碎片可对照测试 expandable_segments。若峰值活跃状态已超容量，应改分片、并发行数或 offload 计划。
+
+> 依据　vLLM v0.10.2《Sleep Mode》及 NVIDIA CUDA Driver API《Virtual Memory Management》。`,
   },
   {
     id: 'rl-06',
@@ -419,21 +399,21 @@ export const RL_QUESTIONS = [
     rubric: [
       {
         id: 'async-env-decouple',
-        label: '推理与环境完全异步解耦：请求一旦生成 Tool Call 立即挂起/释放推理槽位交给环境池执行，绝不阻塞 GPU 等待 CPU/IO 沙箱',
+        label: '环境等待期间释放生成槽位，用有界异步状态机连接推理和工具池',
         weight: 24,
         keywords: ['解耦', '异步', 'async', '事件循环', '不阻塞', 'gpu空等', 'io', '并发', 'scheduler', '挂起'],
         probe: '如果按传统同步 Batch 跑多轮 Agent Rollout（等所有样本工具执行完再一起发下一轮推理），GPU 利用率会惨到什么程度？怎么设计异步调度环？',
       },
       {
         id: 'sandbox-isolation',
-        label: '安全与极速沙箱池：基于 Firecracker MicroVM / gVisor / Kata / Rootless Container 预热池 + Copy-on-Write 文件系统快照（如 OverlayFS/CRIU）实现百毫秒级环境重置',
+        label: '按威胁模型选 microVM 或沙箱运行时，预热镜像并验证隔离、清理与重置时延',
         weight: 24,
         keywords: ['firecracker', 'gvisor', 'microvm', '沙箱', 'sandbox', '隔离', '快照', 'snapshot', '预热', 'cow', 'overlayfs', 'cgroup', 'seccomp'],
-        probe: '模型在探索期会写出 `rm -rf /`、Fork Bomb、死循环或者打爆宿主机网络的危险代码，同时我们每秒要起几千个 SWE-Bench 仓库环境，用普通 Docker 每次 `git clone` 根本来不及，沙箱层怎么做到“强安全 + 百毫秒极速复用”？',
+        probe: '在模型生成的代码可能死循环或耗尽资源时，怎样设计隔离、配额、环境重置和预热，并测量真实启动 P99？',
       },
       {
         id: 'prefix-kv-affinity',
-        label: '多轮 KV Cache 复用：同一 Agent 会话的 20 轮交互高度共享前缀，配合 Session-Affinity 路由 + SGLang RadixAttention / 分层 KV 缓存避免每轮重算 Prefill',
+        label: '相同版本和 token 前缀下用会话亲和或分层缓存，并核算等待期间 KV 驻留成本',
         weight: 22,
         keywords: ['prefix', 'radix', '亲和', 'affinity', 'session', 'kv', '复用', '多轮', '重算', 'prefill'],
         probe: '一个 SWE Agent 交互 30 轮，第 30 轮上下文已达 64K，每轮只多了几百 Token 的工具返回值。如果网关随机路由到不同推理节点，会发生什么算力灾难？怎么解决？',
@@ -447,7 +427,7 @@ export const RL_QUESTIONS = [
       },
       {
         id: 'timeout-fault',
-        label: '容错与长尾治理：严格的单步/全轨迹超时控制 (CPU/内存/磁盘/网络 cgroup 限额)、环境失败重试区分“模型写错代码”与“沙箱基础设施故障”',
+        label: '设置 CPU/内存/PID、磁盘与网络的适当隔离与配额，区分基础设施失败、模型行为和任务超时',
         weight: 14,
         keywords: ['超时', 'timeout', '限额', '故障', '重试', '基础设施', 'reward', '污染'],
         probe: '如果某个代码测试超时是因为沙箱宿主机 CPU 负载太高（Infra 故障）而非模型代码有死循环，直接判 Reward=0 会污染训练信号！系统怎么区分并处理？',
@@ -455,8 +435,8 @@ export const RL_QUESTIONS = [
     ],
     hints: [
       'L1 方向提示：Agentic RL 架构核心是三大支柱——**异步 Token-level 推理-环境事件环**、**预热微虚机快照沙箱池**、**多轮 Session 亲和 KV 缓存复用**。',
-      'L2 显存与延迟权衡：沙箱跑 pytest 可能花 15 秒，如果 15 秒内死占着 GPU KV Cache 不放，显存瞬间爆掉；可以把休眠期会话的 KV 异步 Offload 到 Host DRAM/Mooncake KVCache Pool，工具返回后再按 Session 亲和拉回！',
-      'L3 训练侧陷阱：多轮轨迹中必须对 Observation (Tool Output) 打严格的 \`loss_mask = 0\`，且如果每轮工具调用都在独立截断，需要支持 Prefix Sharing / Tree Packing 避免同一前缀重复做训练前反向。',
+      'L2 会话等待工具时可释放算力槽位，是否保留 KV 另行决策。比较重新 prefill、双向搬运和等待期间占用的显存。',
+      'L3 保留真正采样的 token ID 与行为 logprob。工具观察参与上下文，policy loss 只覆盖动作位置。',
     ],
     followUps: [
       {
@@ -465,24 +445,17 @@ export const RL_QUESTIONS = [
       },
       {
         stage: 'corner',
-        question: '追问 2（Tokenization Drift）：在多轮交互里，如果每轮都把历史对话转回 String 文本再重新用 Chat Template Tokenize，会导致严重的 Token 边界漂移（Retokenization Mismatch），进而破坏 Prefix Cache 和 Logprob 对齐。怎么彻底根治？',
+        question: '追问 2（Tokenization drift）　按轮拼接 token IDs 与重新渲染全量 chat template，何时产生不同前缀？怎样同时保证缓存匹配和训练 action logprob 对齐？',
       },
     ],
-    referenceAnswer: `### Principal 级 Agentic RL 基础设施架构
+    referenceAnswer: `### 一条轨迹的状态与失败语义
 
-#### 1. 全异步 Rollout-Environment 状态机
-- 将每条 Agent Trajectory 建模为独立的异步状态机（\`LLM_GEN -> TOOL_PARSE -> ENV_EXEC -> OBS_APPEND -> LLM_GEN\`），用高并发轻量调度器维持数倍于推理槽位的 **In-flight Trajectories**（如 GPU 并发 256，系统同时维护 2000 个活跃会话）。
-- 只要某会话产出 \`</tool_call>\`，立刻释放 GPU 计算槽位，后台派发给分布式沙箱池执行；GPU 零空等 IO。
+1. 调度器给每条轨迹保存会话、环境快照、策略版本和请求 ID。在模型产出工具调用后归还生成槽位，异步排队到有并发上限的环境池。工具完成后追加 observation，再排入下一轮生成。用队列上限和背压控制在途会话、CPU 工作量与 GPU KV。重试按调用 ID 去重，有副作用的工具应从一致快照恢复。
+2. 执行不可信代码可采用隔离的 microVM 或 gVisor 类沙箱，按威胁模型选边界。使用只读基础镜像、会话独立可写层、最小权限与受控网络。CPU、内存、PID、磁盘和网络分别限额。快照预热可省启动耗时，归还前清理进程、文件和凭据，按实际仓库测 P95/P99。区分代码测试失败、可复现的资源超限、宿主机故障，按任务奖励规则计分或有界重试。
+3. **48K KV 等待 20 秒**。设实际独占 KV 大小为 K、换出/入带宽为 Bₒ/Bᵢ。换出再换入的耗时下界为 K/Bₒ+K/Bᵢ，可与重算 48K 前缀的实测耗时比较。驻留 20 秒占用 K×20 字节·秒，以这段时间挤掉的请求数或增加的排队时长衡量机会成本。低压力时可留在 GPU。高压力时选择保留共享块、换出或重算。复用键包含模型/adapter 版本、位置配置和 token 前缀。
+4. **训练数据**。存每次真实输入和采样 token IDs、行为 logprob、角色区间和 action mask。冻结 tokenizer 与模板，验证新增 observation 的分隔符、特殊 token 和拼接边界是否保留历史前缀。模板重写历史时只复用相同的最长前缀。训练按真实的状态–动作条件对齐。工具输出和 prompt 仍作为上下文，policy loss 仅取模型采样动作的位置。
 
-#### 2. 高安全、百毫秒级代码沙箱池
-- **隔离底座**：使用 **Firecracker MicroVM** 或 **gVisor/Kata Containers**（强内核隔离防逃逸），配合严格 \`cgroups\`（CPU/Memory/PIDs 防 Fork Bomb）、只读挂载与默认断网策略。
-- **极速复用**：对 SWE-Bench 仓库提前构建镜像与 **OverlayFS / 内存磁盘快照 (Snapshot)**，维护按 Repo 分组的 **Warm Sandbox Pool**，重置环境 < 100ms。
-- **异常信号分离**：区分 **Code Error (模型责任 → Reward=0)** 与 **Infra Error (宿主机 OOM/网络抖动/容器崩溃 → 标记 Invalid 丢弃或重试，绝不喂脏梯度)**。
-
-#### 3. 多轮 KV Cache 复用与 Token-ID Native 链路
-- **Session-Aware Prefix Routing + 分层 KV 池**：同一会话连续多轮尽量路由到同一推理节点利用 **RadixAttention**；若工具执行耗时较长（如 > 5~10s），通过 Mooncake / LMCache 将其 KV 异步卸载到节点 DRAM，工具返回后零重算极速拉回 GPU。
-- **Token-ID Native (防 Retokenization Drift)**：整个 Rollout 闭环以 **Token ID 序列**为一等公民追加拼接（仅对新增 Observation 做局部 Tokenize），不把全历史转回纯文本再重编码，彻底杜绝 BPE 合并边界变化导致的 Prefix Cache 失效与 Logprob 漂移！
-- **训练 Loss Mask**：对所有环境 Observation Tokens 严格置 \`loss_mask = 0\`，仅对模型生成的 Reasoning + Tool Call Tokens 算策略梯度。`,
+> 依据　Firecracker《Production Host Setup》及 veRL 的多轮 rollout / Agent Loop 文档。`,
   },
   {
     id: 'rl-07',
@@ -494,14 +467,14 @@ export const RL_QUESTIONS = [
     tags: ['Precision Mismatch', 'Logprob偏移', 'KL爆炸', 'FP8 Rollout', '排障'],
     summary: '为什么同一权重、同一 Token 序列，vLLM Rollout 算出的 logprob 和 Megatron 训练算出的 logprob 不一样？如何防止策略崩溃？',
     contextSpecs: ['vLLM vs Megatron/FSDP', 'KL Divergence Spike', 'BF16/FP8 Non-determinism', 'IS Correction'],
-    prompt: '【硬核真实排障】你们刚把 72B GRPO 切到了 vLLM (FP8 Rollout) + Megatron (BF16 Train) 的加速方案。跑了 50 步后算法同学紧急找你：同一个模型权重还没更新呢，发现 vLLM Rollout 输出的 `old_logprob` 和 Megatron Forward 重新算出的 `logprob` 竟然存在肉眼可见的偏差，导致部分 Token 的 Importance Ratio $r_t = \\pi_{train}/\\pi_{rollout}$ 飙到 5 以上，KL 散度异常甚至出现负值、训练后期 Reward 直接崩盘！请分析所有可能的系统级根因并给出排查与修复方案。',
+    prompt: '同一版权重下，FP8 vLLM rollout 与 BF16 Megatron teacher-forcing 对同一动作给出了不同 logprob，有些 token 的概率比超过 5。监控还出现负的 KL 指标。怎样区分采样器口径、模型实现偏差、策略更新与估计器性质，并验证修复是否有效？',
     rubric: [
       {
         id: 'precision-kernel',
-        label: '精度与算子实现差异：FP8 Rollout vs BF16 Train 量化误差、不同 GEMM/FlashAttention/PagedAttention 规约顺序 (Floating-point 非结合律) 与 MoE Top-K 边界翻转',
+        label: '区分采样变换、量化与 kernel 数值差异，检查 MoE Top-k 边界及实际路由',
         weight: 26,
         keywords: ['fp8', 'bf16', '非结合律', '累加顺序', 'kernel', 'flashattention', 'pagedattention', 'moe', '路由', 'top-k', 'router', '算子'],
-        probe: '哪怕两边都用 BF16 不用 FP8，为什么 vLLM 和 Megatron 对同一句话算出的 logprob 依然对不上？如果是 MoE 模型，这种微小误差为什么会被指数级放大？',
+        probe: '两边同为 BF16 时，哪些输入、运算顺序或路由边界仍能产生偏差？怎样定位首个出现偏差的位置？',
       },
       {
         id: 'bug-checklist',
@@ -512,57 +485,56 @@ export const RL_QUESTIONS = [
       },
       {
         id: 'kl-neg',
-        label: 'KL 散度负值/爆炸原理解析：无偏估计器 (如 k3: exp(logp_ref - logp) - (logp_ref - logp) - 1) 理论上非负，若发现异常常因 logp_old 混用或跨精度大偏移导致 ratio 失控',
+        label: '区分精确 KL、有符号 k1 样本估计和逐项非负 k3。核对采样分布、mask、符号和精度',
         weight: 18,
         keywords: ['kl', 'k3', 'ratio', '重要性', 'importance', 'clip', 'logprob', '负值', '方差'],
         probe: '为什么训练中会看到 $r_t$ 飙到 5 以上（尤其在低概率/长尾 Token 上）？这对 GRPO 的策略梯度会产生什么破坏？',
       },
       {
         id: 'mitigation-sys',
-        label: '系统与算法联合修复：同步用 Training 引擎重算 `old_logprob` (基准验证)、敏感层保 BF16（Router/LM Head/Attention）、使用 Rollout Importance Sampling (TIS / Masked IS) 显式修正推理-训练偏移',
+        label: '区分 rollout 行为 μ、训练旧策略和更新后策略，独立核算校正比与 PPO 比',
         weight: 22,
         keywords: ['recompute', '重算', 'tis', 'truncated importance sampling', '修正', 'lm head', 'router', 'bf16', '校准', '对齐'],
         probe: 'FP8 Rollout 速度太香了实在不想关掉，那怎么在不放弃 FP8 Rollout 的前提下，让 RL 训练长期稳定不崩？',
       },
       {
         id: 'unit-verify',
-        label: '建立离线数值一致性门禁测试：Step 0 同权重下用相同 Prompt 对比两引擎 Logits/Top-1/Max-Abs-Diff 与 KL 散度 (< 1e-3)',
+        label: '同权重同 token 的 teacher-forced 分层对照，按精度、位置、概率桶和质量基线定门槛',
         weight: 10,
         keywords: ['门禁', '单测', 'step 0', 'logits', 'max diff', '对比', '验证', 'ci'],
-        probe: '作为 Infra 负责人，怎么把这类静默精度 Bug 彻底拦截在上线跑千卡集群之前？',
+        probe: '如何为这个模型选择有验证依据的容差，并把它纳入换权和后端升级的回归检查？',
       },
     ],
     hints: [
       'L1 方向提示：按「先查硬 Bug（权重/RoPE/Tokenize 错位）→ 再查数值源（FP8/BF16、Kernel 规约、MoE Router 翻转）→ 最后给治理方案（敏感层高精度 + TIS 重要性修正）」的排查逻辑。',
-      'L2 MoE 蝴蝶效应：在 MoE 模型里，哪怕 BF16 浮点误差只有 \`1e-3\`，只要落在 Router Top-8 边界上，就会导致同一 Token 在推理和训练时**路由到完全不同的专家**，瞬间引爆巨大的 Logprob 偏移！',
-      'L3 工业界 SOTA 治本方案：(1) **Rollout Importance Sampling (Truncated IS / IcePop)** 明确把 $\\pi_{rollout}$ 当作行为策略做截断重要性采样修正；(2) MoE 可采用 **Routing Replay**（训练时复用 Rollout 记录的专家路由索引）或把 Router/LM Head 死锁在 FP32/BF16！',
+      'L2 当两个专家分数接近时，小误差可能改变 top-k 集合。直接比较每层路由分数、索引与输出，而非预设放大倍数。',
+      'L3 保留行为、旧策略和当前策略三份有明确定义的 logprob。先校验采样器，再评估截断校正或路由回放的收益和偏差。',
     ],
     followUps: [
       {
         stage: 'deepen',
-        question: '追问 1（MoE Routing Replay）：对于 671B MoE RL，哪怕两边都是 BF16，只要 Router 选出的专家差了 1 个，logprob 就会严重偏移。听说过 **Rollout Routing Replay (R3)** 吗？它怎么做到零精度漂移，会带来什么显存/通信成本？',
+        question: '追问 1（MoE 路由回放）　保存每层每 token 的 top-k 专家索引可以排除哪种差异？哪些误差会保留，传输量怎样估算？',
       },
       {
         stage: 'corner',
-        question: '追问 2（低概率 Token 放大效应）：观察发现 99% 的高概率 Token 两边 logprob 差不到 0.01，但某些采样出来的低概率探索 Token（如 $p=0.001$）误差高达 $\\Delta \\log p = 2.0$，为什么低概率 Token 对精度差异这么敏感？',
+        question: '追问 2（尾部概率）　若 Δlog p=2，概率比是多少？相同的绝对概率误差和相同的 logit 误差，对长尾 token 的含义有什么不同？',
       },
     ],
-    referenceAnswer: `### Staff 级 Train-Inference Mismatch 排障指南
+    referenceAnswer: `### 对齐一次动作的三种概率
 
-#### 1. 第一优先级：排除致命硬 Bug（Step-0 门禁自检）
-在 Step 0 刚做完一次 Weight Sync（未更新参数）时，固定同一条 Token ID 序列分别喂给 vLLM 与 Megatron，逐层比对 Hidden States 与 Logits：
-- 检查 **QKV / GateUp 切分顺序**、**RoPE Interleaved vs NeoX 布局**、**LM Head / Embedding 权重共享与同步漏项**；
-- 检查 **BOS/EOS 与 Retokenization 漂移**（必须直接传 Token IDs 而非重编码字符串）；
-- 检查 **Varlen / Packing Attention Mask**（是否跨样本泄漏了 Attention）。
+固定 checkpoint、prompt 和完整 token IDs 做 teacher-forcing，按同一位置比较预测下一个 token 的 logits。记录实际行为策略 μ（含 temperature、top-k/p、logits processor 后的采样分布）、更新前训练策略 π_old、当前策略 π_θ。先确认引擎返回 raw logprob 还是采样后 logprob，再选择目标函数所需口径。核对 mask、分母归一化、BOS、position IDs、右移一位、RoPE 与权重同步。PPO 更新比是 π_θ/π_old。rollout 校正可另用 π_old/μ。重算 π_old 不能替代生成时 μ 的记录。
 
-#### 2. 第二优先级：底层数值与算子差异根因
-1. **FP8 Rollout vs BF16 Train 量化噪声**：低概率尾部 Token 在 Softmax 指数放大下对微小的 Logit 误差极度敏感（Logit 差 0.5 就能让概率比差 1.65×）。
-2. **浮点非结合律 & Kernel 差异**：vLLM PagedAttention/FlashInfer 与 Megatron FlashAttention/cuBLAS 的分块归约顺序不同，加上 Batch Size 不同导致矩阵乘 Split-K 策略改变，产生 Batch-Invariance 破坏。
-3. **MoE Router 边界翻转（蝴蝶效应）**：1e-3 的 Hidden State 差异导致 Top-K 路由换了专家，Logprob 瞬间雪崩。
+### 负值究竟是哪一个量
 
-#### 3. 工业级根治方案
-- **精准隔离高精度模块**：Weight Sync 与 FP8 Rollout 时，强制将 **LM Head、MoE Router Gate、RMSNorm、Embedding** 保持在 BF16/FP32，并在 FP8 上采用细粒度 \`1×128 / 128×128\` Blockwise 量化而非粗糙 Per-Tensor。
-- **算法-系统联合修正（Truncated Importance Sampling / IcePop）**：不再盲目假设 $\\pi_{rollout} = \\pi_{train\_old}$，显式保存推理侧 \`rollout_logprob\`，在 Loss 中引入截断重要性采样系数 $\\min(\\frac{\\pi_{train}}{\\pi_{rollout}}, C)$ 或对偏移超阈值的极端 Token 做 Mask 屏蔽。
-- **MoE 终极稳定器（Routing Replay）**：Rollout 时顺带回传每个 Token 选中的 Top-K 专家索引（每 Token 每层仅几字节），训练侧 Forward 强制按同一专家路由计算，彻底消除路由分歧。`,
+- 精确 KL(p‖q)=Σp log(p/q) 在合法分布上非负。从 p 抽样的 k1=log p−log q 单样本或小批平均可为负。令 d=log q−log p，则 k3=exp(d)−1−d 逐项非负。在两分布支持一致、样本来自 p 时，其期望等于该 KL。若 k3 明显为负，查实际记录的是惩罚项还是正值 KL、是否错减/加权、mask 与实现。接近零时可用 FP32 及 \`expm1(d)−d\` 对照。
+- Δlog p=2 对应概率比 e²≈7.39，超过 5 对应 Δlog p>ln 5≈1.61。相同绝对概率差对小概率的相对影响更大。但单凭 p 小无法推出 logit 小扰动必定放大。固定支持、无截断的 log-softmax，若各 logit 变化至多 ε，则任一 logprob 变化至多 2ε。
+
+### 找到第一处偏离再修
+
+先跑未量化 BF16 对照，再逐项打开 FP8、不同 batch/kernel、packing 或路由。检查 QKV/GateUp 与 LM head 映射、attention 边界。按层比较激活与 MoE top-k，按位置和原概率分桶记录 Δlogprob、ratio 尾部、clip 比例、有效样本量和任务奖励。路由回放每 token 至少需记录 MoE 层数 × top-k × 索引字节，可排除专家选择差异，量化和专家输出仍可能不同。
+
+有证据后再保留特定层的高精度或调整 scale。在相同采样支持上，截断或屏蔽高比值样本能控制方差，但会改变估计。实际行为分布为零的动作无法靠重要性采样恢复。用相同训练预算比较质量，依据 BF16 重复测量和业务指标定容差。
+
+> 依据　veRL《Mathematical Formulations of Rollout Correction Methods》及 John Schulman《Approximating KL Divergence》。`,
   },
 ];

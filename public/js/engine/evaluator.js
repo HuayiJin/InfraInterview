@@ -323,7 +323,7 @@ const RESUME_SIGNALS = [
     patterns: ['fp8', 'e4m3', 'transformer engine', 'ring attention', 'ulysses', '128k', '256k', 'context parallel'],
     relatedIds: ['tr-04', 'tr-05'],
     probes: [
-      '开启 FP8 训练或扩 128K 长上下文后，遇到过哪些 Loss Spike 或梯度异常？怎么证明它不是数据问题而是量化 Scale/累加精度/Causal 负载问题？',
+      '开启 FP8 或扩到 128K 后，遇到过哪些 Loss Spike 或梯度异常？如何用同一 checkpoint 和 batch 回放，区分数据、缩放、累加精度与 mask 等因素？',
     ],
   },
   {
@@ -332,7 +332,7 @@ const RESUME_SIGNALS = [
     patterns: ['容错', 'checkpoint', 'goodput', 'straggler', '慢节点', 'sdc', 'hang', '千卡', '万卡', '弹性训练'],
     relatedIds: ['tr-06'],
     probes: [
-      '你们集群的真实 Goodput 和 MTTR 是多少？异步 Checkpoint 阻塞训练几秒？遇到一次 NCCL Hang，你平均几分钟能精准定位到坏卡或坏光模块？',
+      '你们如何定义和测量 Goodput、MTTR 与异步 Checkpoint 的训练侧阻塞？举一次 NCCL Hang，说明哪条证据把根因缩小到了代码、节点或链路。',
     ],
   },
   {
@@ -368,7 +368,7 @@ const RESUME_SIGNALS = [
     patterns: ['rlhf', 'ppo', 'grpo', 'dpo', 'verl', 'openrlhf', 'hybridengine', 'rollout', 'weight sync', '权重同步', 'sleep mode', 'ray'],
     relatedIds: ['rl-01', 'rl-02', 'rl-03', 'rl-04', 'rl-05', 'rl-07'],
     probes: [
-      '你们 RL 系统选了 Colocated (veRL) 还是 Disaggregated (Ray)？每步 Rollout 占总时间百分之多少，权重同步花了几秒？如何处理长 CoT 尾部 Straggler 和 Train-Infer Logprob 偏移？',
+      '你们的训练与 Rollout 如何放置，策略按什么节奏同步？两阶段各占多少 GPU·秒，换权耗时多少？如何处理长 CoT 尾部和行为策略 logprob 偏移？',
     ],
   },
   {

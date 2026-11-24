@@ -8,19 +8,19 @@ export const KERNEL_QUESTIONS = [
     incident: false,
     tags: ['FlashAttention', 'Online Softmax', 'Tiling', 'TMA', 'WGMMA', 'Warp Specialization'],
     summary: '从 IO-Aware 显存层级出发，串联 FA1 Tiling/Online Softmax、FA2 序列并行与 Warp 重排，再到 FA3 Hopper 异步流水线。',
-    contextSpecs: ['SRAM 20MB vs HBM 80GB', 'Online Softmax', 'Hopper TMA + WGMMA', 'FP8 Incoherent'],
-    prompt: 'FlashAttention 是现代 LLM 训练和推理最核心的算子。请讲清楚：(1) FlashAttention-1 是如何通过 Tiling + Online Softmax + 反向重算消除 $O(N^2)$ HBM 读写的？(2) FlashAttention-2 相比 FA1 做了哪三项关键改进把利用率从 ~35% 拉到 ~70%？(3) 到了 Hopper H100 上，FlashAttention-3 又如何结合 TMA、WGMMA 和 Warp Specialization 实现极致异步流水？',
+    contextSpecs: ['每个 SM 的片上存储与 HBM', 'Online Softmax', 'Hopper TMA + WGMMA', 'FP8 分块量化'],
+    prompt: '以 dense attention 为例，解释 FA1 如何避免在 HBM 中物化 N×N 分数和概率矩阵，说明算术复杂度、工作显存和 HBM 访问量的区别。FA2 如何提高并行度和减少非矩阵运算？FA3 在 Hopper 上如何重叠 TMA、WGMMA 和 softmax？',
     rubric: [
       {
         id: 'fa1-io',
-        label: 'FA1 核心：IO-Aware 分块 (Tiling) 把 Q/K/V 载入片上 SRAM，用 Online Softmax 维护局部最大值 m 和归一化分母 l，避免把 N×N Attention Matrix 写回 HBM；反向仅存 logsumexp 重算',
+        label: '说明分块、在线 softmax 的重缩放及反向所需 Q/K/V、输出与行统计量',
         weight: 26,
         keywords: ['sram', 'hbm', 'tiling', '分块', 'online softmax', 'n^2', 'o(n)', 'logsumexp', '重算', 'recompute'],
         probe: 'Softmax 需要对一整行求 max 和 sum，分块计算怎么保证算完最后一个 K 块时结果和全局 Softmax 数学完全一致？反向传播不存 N×N 矩阵那要存什么？',
       },
       {
         id: 'fa2-improvements',
-        label: 'FA2 三大改进：(1) 减少非矩阵乘 FLOPs (推迟 rescale 到循环末尾)；(2) 外循环换 Q 内循环换 KV 并沿序列长度并行提高低 Batch Occupancy；(3) Warp 切分从 Split-K 改为 Split-Q 消除 Shared Memory 归约通信',
+        label: 'FA2 减少非矩阵乘运算、沿 Q 块并行、warp 采用 sliced-Q 降低跨 warp 规约',
         weight: 26,
         keywords: ['fa2', '非矩阵', 'rescale', '序列维度', '并行', 'occupancy', 'split-q', 'split-k', 'warp', 'shared memory'],
         probe: 'FA1 在长序列小 Batch（比如 B=1, S=16K）时很多 SM 都在闲置，而且 Warp 之间要频繁通过 Shared Memory 归约。FA2 是怎么调换内外循环和 Warp 切分方式的？',
@@ -41,10 +41,10 @@ export const KERNEL_QUESTIONS = [
       },
       {
         id: 'io-complexity',
-        label: 'HBM IO 复杂度对比：标准 Attention 为 O(N² + Nd)，FA 降为 O(N²d²/M)（M 为 SRAM 容量），大幅降低读写量',
+        label: '区分 dense FLOPs、分数矩阵的物化空间和 HBM IO 复杂度，注明片上容量 M 的单位',
         weight: 12,
-        keywords: ['复杂度', 'io', 'm', '带宽', 'memory-bound', '访存'],
-        probe: '定性或定量说一下，为什么标准 Attention 在长序列下是严重的 Memory-Bound 而不是 Compute-Bound？',
+        keywords: ['复杂度', 'hbm', '片上', 'io', '工作显存', 'nd', 'n²', 'n^2', '访存'],
+        probe: '给定序长 N、head_dim d 和能容纳 M 个元素的片上空间，FA 减少了哪部分 IO？为何计算量仍随 N² 增长？',
       },
     ],
     hints: [
@@ -55,33 +55,26 @@ export const KERNEL_QUESTIONS = [
     followUps: [
       {
         stage: 'deepen',
-        question: '追问 1（Decode 瓶颈与 FlashDecoding）：FA2 虽然沿序列维并行了 Query，但在推理 Decode 阶段 $S_q = 1$（每次只生成 1 个 Token），Query 维度根本没法切分，如果 Batch=1 且 Head 少，H100 的 132 个 SM 只用到十几个！FlashDecoding / Split-KV 是怎么解决的？',
+        question: '追问 1（Decode）　当 S_q=1、batch 和 head 数也较小时，Flash-Decoding/Split-KV 如何为不同 SM 分工？局部输出怎样合并？',
       },
       {
         stage: 'corner',
-        question: '追问 2（Causal Mask 空块跳过）：在自回归 Causal Attention 中，矩阵右上角一半全是被 Mask 掉的 0。FA2 在调度 Threadblock 时如果按顺序映射，依然会遇到不同 SM 负载不均（Wave Quantization），工程上怎么优化 Block 调度顺序？',
+        question: '追问 2（Causal）　哪些 K 块可以整块跳过？不同 Q 块所需工作量不同时，怎样减少最后一波 threadblock 的空闲？',
       },
     ],
-    referenceAnswer: `### Staff 级 FlashAttention 演进精讲
+    referenceAnswer: `### FA1 保存行统计量，反向按块重算
 
-#### 1. FlashAttention-1：打破 $O(N^2)$ HBM 瓶颈
-- **痛点**：标准 Attention 必须把 $S = QK^T \\in \\mathbb{R}^{N\\times N}$ 和 $P = \\text{softmax}(S)$ 完整物化写回 HBM 再读出，长序列下 HBM IO 成为绝对瓶颈且显存 $O(N^2)$ 爆炸。
-- **解法**：
-  - **Tiling + Online Softmax**：将 $Q, K, V$ 分块加载到片上 SRAM，逐块计算 $S_{ij}$ 并动态维护行最大值 $m_i$ 与指数和 $l_i$，借助 rescale 修正因子迭代更新输出 $O_i$，全程不把 $N\\times N$ 矩阵落盘 HBM；
-  - **反向重算**：前向仅保存输出 $O$ 和 $O(N)$ 大小的 \`logsumexp\` ($L_i = m_i + \\log l_i$)，反向按块在 SRAM 内即时重算 $P_{ij}$，换取显存降至 $O(N)$ 且端到端更快。
+对一行 query 逐块计算 scores。设旧最大值、指数和与未归一化输出分别为 m、ℓ、u。新块 scores 为 sⱼ，取 m′=max(m,max sⱼ)，则 ℓ′=exp(m−m′)ℓ+Σexp(sⱼ−m′)，u′=exp(m−m′)u+Σexp(sⱼ−m′)vⱼ。最后 O=u/ℓ。块顺序在精确算术下不改变结果，浮点实现有舍入差异。反向用 Q/K/V、O 及行归一化统计量（如 logsumexp）重算局部概率，再求梯度。使用 dropout 时还需复现相同 mask。
 
-#### 2. FlashAttention-2：把 Tensor Core 利用率翻倍到 ~70%
-1. **减少非 MatMul 开销**：Tensor Core 吞吐是 CUDA Core 标量算术的 16×；FA2 推迟每步对 $O_i$ 的完整除 $l_i$ 缩放，统一留到内循环结束一次做完。
-2. **外循环 Q / 内循环 KV + 序列维并行**：除了 Batch 和 Head 维，增加沿 **Query Sequence 维** 切分给不同 Threadblock，同时让 $O_i$ 留在寄存器累加，只写回 HBM 一次。
-3. **Warp 切分改 Split-Q**：FA1 切分 K/V（Split-K）导致多 Warp 算同一行 $O_i$ 必须经过 Shared Memory 同步归约；FA2 改为各 Warp 独立负责不同的 Q 行，零跨 Warp 归约！
+**三种量**。消除的是全局物化的 N×N 中间矩阵，输入输出仍占 O(Nd)，行统计量 O(N)。dense 计算量仍为 Θ(N²d)。FA1 论文的两级存储模型中，M 按片上可容纳的元素计，在 d≤M≤Nd 的范围 HBM 访问量为 O(N²d²/M)，对照物化实现 Θ(Nd+N²)。tile 受单个 SM 可用寄存器与共享内存限制，不能使用整卡片上容量之和来定尺寸。
 
-#### 3. FlashAttention-3：Hopper 架构深度异步协同
-- **Warp Specialization**：把一个 CTA 内的 Warp 拆为 **Producer**（只调 TMA 异步把 Q/K/V 搬进 SMEM，寄存器配额降到极低）与 **Consumer**（拿走省下的高寄存器配额专心跑异步 WGMMA + Softmax）。
-- **Ping-Pong Scheduling & Intra-Warp Overlap**：两个 Consumer Warp Group 错相交替执行——一组占着 Tensor Core 跑 WGMMA 时，另一组占着 SFU/CUDA Core 算 \`exp2\` Softmax，把慢速 Softmax 完全藏在矩阵乘后面。
-- **FP8 Incoherent Processing**：对 Q/K 乘随机正交 Hadamard 矩阵打散通道离群值（因 $Q H (KH)^T = Q K^T$ 数学恒等！），大幅压低 FP8 量化误差。
+### FA2 与 FA3 利用什么并行性
 
-#### 4. Decode 追问：FlashDecoding (Split-KV)
-- 当 Decode $S_q=1$ 且 Batch 很小时，Query 维无法切分；**FlashDecoding** 改为沿 **KV 序列长度切分 (Split-KV)** 给大量 SM 并行算局部 Attention 和 \`logsumexp\`，最后用一个极轻量 Reduction Kernel 合并，打满全部 132 个 SM 的 HBM 带宽！`,
+- FA2 让不同 threadblock 持有不同 Q 行块并遍历 KV，改善小 batch、长 Q 的并行度。warp 之间划分 Q，减少对同一输出的共享内存归约。推迟最终归一化，减少非矩阵乘 FLOPs。最大值变化时仍要重缩放旧的累积量。
+- FA3 在 Hopper 上用 producer/consumer warp specialization 和 TMA 搬运，用异步 WGMMA 及错相调度将矩阵乘与 softmax 重叠。FP8 路径采用块缩放等办法。对 Q、K 施加同一正交旋转保留 QKᵀ，能分散部分通道离群值。收益随精度和形状而变。
+- **两项追问**。单 query 可按 KV 长度切给多组并行计算，各自保存局部输出和 logsumexp，再按其指数权重归一合并。切得过细将增加启动与规约成本。Causal prefill 可跳过全部位于未来的 K 块，只在对角边界做细粒度 mask。可先调度工作量大的 Q 块，按 batch/head 交错以缩短最后一波。
+
+> 依据　FlashAttention（arXiv:2205.14135）、FlashAttention-2（2307.08691）和 FlashAttention-3（2407.08608）。`,
   },
   {
     id: 'kn-02',
@@ -97,28 +90,28 @@ export const KERNEL_QUESTIONS = [
     rubric: [
       {
         id: 'ring-vs-tree',
-        label: 'Ring vs Tree 精确对比：Ring 为 ReduceScatter+AllGather，单卡收发 2(N-1)/N·S (带宽最优但延迟 O(N))；Tree/Double-Binary-Tree 延迟 O(log N) 适合小消息或超大规模节点',
+        label: 'Ring 每 rank 发送与接收各 2(N−1)S/N，延迟轮数 O(N)。Tree 的深度 O(log N)，说明模型与规模',
         weight: 26,
         keywords: ['ring', 'tree', '2(n-1)/n', 'reducescatter', 'allgather', 'o(n)', 'o(log', '小消息', '大消息', '带宽最优', '延迟最优'],
-        probe: 'Ring AllReduce 在 $N$ 张卡上同步大小为 $S$ 的张量，每张卡的发送字节量是多少？为什么卡数 $N$ 到几千时，哪怕是大张量 NCCL 也会切到 Tree 或混合算法？',
+        probe: 'N 个 rank、每 rank 有 S 字节输入时，Ring 每 rank 发送多少？哪些延迟、带宽或拓扑条件会使 Tree 更有利？',
       },
       {
         id: 'nvls-sharp',
-        label: '硬件网内计算加速：NVLink Switch SHARP (NVLS) / IB SHARP 把归约下沉到交换机芯片，通信量减半（每卡仅发 S 收 S）且不占额外 SM 算力',
+        label: '区分 NVSwitch NVLS 和 IB SHARP 的归约范围、端点字节与物理网络流量',
         weight: 16,
         keywords: ['sharp', 'nvls', '网内计算', 'in-network', 'switch', '交换机', '减半', 'nvswitch'],
-        probe: 'H100 / B200 的 NVSwitch 和 InfiniBand 交换机支持 SHARP / NVLS 网内计算，这相比传统 Ring AllReduce 把网卡流量砍掉了多少？',
+        probe: '网内归约在哪个域执行？理想端点的发送量与链路上所有字节有什么不同？',
       },
       {
         id: 'rail-topo',
-        label: 'Rail-Optimized 拓扑：单机 8 张 GPU 的第 i 张网卡直连第 i 个 Leaf (Rail) 交换机，使同号 GPU 跨机 DP/PP 通信仅走 1 跳 Leaf 极少上 Spine，且匹配 PXN 机内转发',
+        label: 'Rail 对齐跨节点 NIC 与流量映射，实际跳数取决于 fabric。解释 PXN 机内中转',
         weight: 22,
         keywords: ['rail', 'leaf', 'spine', '同号', '一跳', '1跳', 'dp', 'pxn', '网卡', 'pci', 'numa'],
-        probe: '为什么 AI 集群不把一台机器的 8 张网卡全插到同一台接入交换机，而是刻意按 GPU 编号 0~7 分别连到 8 个不同的 Rail Leaf 交换机？',
+        probe: '8 张 NIC 分散在多个 rail 有什么好处？跨机同号 GPU 的路径在什么条件下仍会经过 spine？',
       },
       {
         id: 'roce-congestion',
-        label: 'RoCEv2 痛点：ECMP 静态五元组哈希冲突（大象流哈希极化导致链路不均）、PFC 死锁/队头阻塞与暂停帧风暴，需精细配置 ECN + DCQCN + 负载均衡（Packet Spraying/Adaptive Routing）',
+        label: '用队列、ECN/CNP、PFC pause 与链路利用率诊断 RoCEv2，结合设备选择负载均衡',
         weight: 22,
         keywords: ['roce', 'ecmp', '哈希', 'hash', '极化', 'pfc', 'ecn', 'dcqcn', '死锁', '风暴', '队头阻塞', 'adaptive routing', 'spray'],
         probe: '相比原生带信用流控和自适应路由的 InfiniBand，RoCEv2 在跑高负载 All-to-All 或 DP AllReduce 时为什么特别容易掉速甚至触发雪崩？',
@@ -132,40 +125,33 @@ export const KERNEL_QUESTIONS = [
       },
     ],
     hints: [
-      'L1 方向提示：Ring 看“吞吐接近理论峰值 $B$ 但步数 $2(N-1)$”，Tree 看“步数 $2\\log_2 N$ 延迟极低（Double Binary Tree 同样吃满双向带宽！）”。',
-      'L2 Rail 拓扑直觉：当单机 8 卡跑机内并行（如 TP/HSDP/EP=8）时，跨机通信往往发生在**所有机器的同号 GPU 之间（GPU 0 ↔ GPU 0 ...）**！按 Rail 连线后，同一 DP/PP 组里多台机器的同号 GPU 全挂在同一 Leaf 交换机下，1 跳直达不经 Spine！',
-      'L3 RoCEv2 三大坑：ECMP 哈希冲突（两条大象流撞同一上行口）+ ECN 阈值没配好导致过早触发 PFC 暂停帧 + PFC 蔓延成 Pause Storm / 死锁。',
+      'L1 按每 rank 单向发送，Ring 有 2(N−1) 轮，每轮约 S/N 字节。树关注最深路径与分块流水。',
+      'L2 同号 NIC 使用同一 rail 可避免跨 rail。每个 rail 自身也可能包含多层交换机。',
+      'L3 分别检查 ECMP 偏斜、ECN 标记及 PFC 的队头阻塞。联查实际阈值、headroom 和端到端反馈延迟。',
     ],
     followUps: [
       {
         stage: 'deepen',
-        question: '追问 1（All-to-All vs Rail）：Rail-Optimized 拓扑对 DP AllReduce 简直完美（全在 Rail 内一跳完成），但在 MoE **EP All-to-All** 场景下（GPU 0 要发给另一台机器的 GPU 3），流量必须穿过 Spine，此时 NCCL 的 **PXN (PCIe × NVLink)** 技术是怎么巧妙绕开跨 Rail 的？',
+        question: '追问 1（All-to-All 与 Rail）　源 GPU 与目标 GPU 的本地 NIC 分属不同 rail 时，PXN 如何利用 NVLink 和同机另一张 NIC？',
       },
       {
         stage: 'corner',
-        question: '追问 2（BusBW vs AlgBW）：大家测 `nccl-tests` 时输出表里有 `algbw`（算法带宽）和 `busbw`（总线带宽）两列，对于 AllReduce 它们之间的换算系数为什么是 $2\\frac{N-1}{N}$？验收集群网络时该看哪一个？',
+        question: '追问 2（BusBW 与 AlgBW）　nccl-tests 的 AllReduce 为何以 2(N−1)/N 归一化？验收时怎样将这两个指标与 NIC 计数器对照？',
       },
     ],
-    referenceAnswer: `### Staff 级 NCCL 与集群网络深度解析
+    referenceAnswer: `### 固定字节口径后再比较算法
 
-#### 1. Ring vs Tree AllReduce 定量对比（卡数 $N$，消息大小 $S$，单向链路带宽 $B$，单跳延迟 $\\alpha$）
-- **Ring AllReduce**（1 次 ReduceScatter + 1 次 AllGather）：
-  - 每卡总发送量：$2\\frac{N-1}{N} S$（约 $2S$），**总线带宽 \`BusBW = AlgBW × 2(N-1)/N\`**；
-  - 耗时：$T_{\\text{ring}} = 2(N-1)\\alpha + 2\\frac{N-1}{N}\\frac{S}{B}$；
-  - **特点**：中等 $N$ + **大消息**时带宽利用率近 100%；但延迟 $O(N)$ 随卡数线性恶化。
-- **Double Binary Tree AllReduce**：
-  - 耗时：$T_{\\text{tree}} = O(\\log N)\\cdot \\alpha + 2\\frac{S}{B}$（双互补树同时打满叶节点上下行带宽）；
-  - **特点**：**小消息**或**超大卡数 ($N \\ge 64\\sim 1024$)** 时延迟优势碾压 Ring。
-- **NVLS / IB SHARP（网内计算）**：把规约加法下沉到 NVSwitch/IB 交换机 ASIC 中，每卡只需发 $1S$、收 $1S$，有效总线流量直降 **50%**！
+N 个 rank，每个输入 S 字节，每段启动延迟 α、单向有效带宽 B。标准 Ring 做 ReduceScatter 和 AllGather，各 N−1 轮、每轮每 rank 发送 S/N。每 rank **发送与接收各** 2(N−1)S/N 字节。忽略拥塞、规约计算与协议开销，T≈2(N−1)α+2(N−1)S/(NB)。nccl-tests 的 algbw=S/T，AllReduce 的 busbw=algbw×2(N−1)/N。它是归一化的有效带宽，硬件计数器才给出每条链路的实际流量。
 
-#### 2. Rail-Optimized 拓扑与 PXN 协同
-- 机内 8 张 GPU 各自配一张就近同一 PCIe Switch 下的 NIC（保证 GPUDirect RDMA 不跨 CPU QPI/UPI），每台主机的 NIC $k$ 统一接入第 $k$ 号 **Rail Leaf 交换机**。
-- 当单机 8 卡运行机内并行域（TP / HSDP / EP）时，跨机 **DP** 和 **PP** 通信大量发生在**同号 GPU 之间**，全部在同一 Rail Leaf 内 **1 跳完成**，极大减轻 Spine 拥塞。
-- **PXN 妙用（针对 All-to-All 跨 Rail 通信）**：当主机 A 的 GPU 0 要发数据给主机 B 的 GPU 3 时，不再跨 Spine，而是先在主机 A 内经超高速 **NVLink** 转给同机 GPU 3，再由 GPU 3 通过本 Rail 网卡 1 跳直达主机 B 的 GPU 3！
+二叉树 reduce+broadcast 的关键路径约 2⌈log₂N⌉ 跳。朴素无分块树每跳传 S，整棵树的每条边各传一份上行和下行。内部节点比叶节点忙。双互补树分割载荷、交错内外节点，分块流水后可兼顾带宽与启动延迟。NCCL 的选择依赖消息、互连、协议和版本，可用消息大小扫描加算法日志核实。
 
-#### 3. RoCEv2 核心拥塞痛点与治理
-- **ECMP 哈希极化**：AI 训练流数量极少但单流极大（Elephant Flows），静态五元组 ECMP 极易把多条大流哈希到同一条 Spine 链路造成局部丢包 → 开启 **QP 多流拆分 (\`NCCL_IB_QPS_PER_CONNECTION=4/8\`)** 或硬件 **Packet Spraying / Adaptive Routing**。
-- **PFC 风暴与 ECN 配合**：RoCEv2 依赖无损以太网 PFC，若 ECN (DCQCN) 降速阈值高于 PFC 暂停阈值，队列来不及降速就会反压触发级联 PFC Pause Storm 拖垮整个集群 → 严格保证 **ECN Mark 阈值 < PFC XOFF 阈值** 并开启 PFC Watchdog 防死锁。`,
+### 拓扑与拥塞追问
+
+- **网内归约**。NVLS 在支持的 NVLink/NVSwitch 域工作，IB SHARP 利用 IB 网络的归约能力。理想端点各提交 S、取回 S，和大 N Ring 相比端点发送可接近减半。机内搬运、交换树流量、GPU 协调与跨域成本另计。
+- **Rail 与 PXN**。把各节点的同号 NIC 放在同一 rail，按 GPU–NIC 亲和性放置通信组。一个 rail 自身可能跨多个 leaf/spine。PXN 可先经 NVLink 把数据交给更适合目标 rail 的同机 GPU，再从它附近的 NIC 发送，也可聚合消息。应同时看跨 NUMA 路径、机内流量和 NIC 计数。
+- **RoCEv2**。ECMP 可能让大流撞在少数上行链路。用端口计数、队列水位、ECN/CNP、PFC 暂停时间和重传定位。ECN 配端侧拥塞控制应有足够时间在触发 PFC 前降速。PFC 在配置不当时会扩散拥塞。结合交换机/NIC 对乱序与自适应路由的支持选择多 QP 或负载均衡，按业务消息规模复测。
+
+> 依据　NVIDIA nccl-tests《Performance》及 NVIDIA 关于 NCCL 2.4 双树与 NCCL 2.12 PXN 的技术说明。`,
   },
   {
     id: 'kn-03',
@@ -188,28 +174,28 @@ export const KERNEL_QUESTIONS = [
       },
       {
         id: 'cuda-graph',
-        label: '消除 Host Launch Overhead：对大量微秒级小算子（如 Decode 阶段）使用 CUDA Graphs 整图捕获发射，消除 CPU Launch 间隙',
+        label: '由 CPU/GPU 相关时间线确认 launch 开销，再比较 CUDA Graph、融合和批量发射',
         weight: 18,
-        keywords: ['cuda graph', 'launch', 'overhead', '捕获', '小算子', 'cpu bound', 'torch.compile'],
+        keywords: ['cuda graph', 'launch', '发射', '融合', '捕获', '小算子', 'cpu bound', 'torch.compile'],
         probe: 'Decode Batch=1 时每个算子在 GPU 上只跑 5 微秒，但 Python 发射一个 CUDA Kernel 就要 10 微秒，GPU 时间线全是锯齿空洞，怎么解决？',
       },
       {
         id: 'coalesced-mem',
-        label: 'Global Memory 合并访存 (Coalesced Access) 与向量化加载 (`float4` / 128-bit LDG)：保证同一 Warp 32 线程访问连续对齐的 128B Cache Line',
+        label: '按 warp 的地址和实际传输的 32 B sector 分析合并访存，区分线程向量化和跨线程合并',
         weight: 20,
         keywords: ['合并访存', 'coalesced', '128', 'float4', '向量化', 'cache line', 'warp', '对齐', 'stride'],
-        probe: '同一个 Warp 里的 32 个线程按列访问一个行主序矩阵，为什么实测 HBM 带宽会直接暴跌几倍？怎么改？',
+        probe: '按列访问行主序矩阵时，每个 warp 要发起多少内存事务？怎样改变 lane 映射并验证实际有效带宽？',
       },
       {
         id: 'bank-conflict',
-        label: 'Shared Memory Bank Conflict：32 个 4-Byte Bank，同 Warp 多线程访问同 Bank 不同地址会串行化；通过 Padding (+1/+8) 或 XOR Swizzle 消除',
+        label: '在常见 32 个 4 B bank 的模型下分析单次事务的访问与广播，针对 tile 选择 padding 或 swizzle',
         weight: 20,
         keywords: ['bank conflict', '32', 'padding', 'swizzle', 'xor', 'shared memory', 'smem', '冲突', '串行'],
         probe: 'Shared Memory 为什么会发生 Bank Conflict？工程上除了简单加 Padding 浪费空间，CUTLASS / FlashAttention 普遍用的零额外显存方案是什么？',
       },
       {
         id: 'occupancy-triton',
-        label: 'Occupancy 与资源权衡（Registers / SMEM / Block Size，并非越高越好，有时高寄存器+ILP 更胜高 Occupancy）及 Triton Block 级编程自动管理合并访存与软流水',
+        label: '结合延迟隐藏、寄存器、共享内存和 spill 调 tile、num_warps、num_stages，以实际时间验证',
         weight: 16,
         keywords: ['occupancy', '寄存器', 'register', 'smem', 'ilp', 'triton', 'num_stages', 'num_warps', '流水'],
         probe: '是不是 Occupancy 越接近 100% Kernel 就一定越快？以及在写 Triton Kernel 时，哪几个核心 Meta 参数 (`BLOCK_SIZE`, `num_warps`, `num_stages`) 直接决定性能？',
@@ -217,8 +203,8 @@ export const KERNEL_QUESTIONS = [
     ],
     hints: [
       'L1 方向提示：牢记黄金顺序——**先宏观 `nsys` 抓系统空洞与通信，再微观 `ncu` 看 SOL (Compute% vs Memory%) 和 Warp Stall Breakdown**。',
-      'L2 Swizzle 原理：把行号的高位和列号做异或 \`col_swizzled = col ^ row\`，既保证行读取无冲突，又让列读取（如转置或 MMA 加载）分散到不同 Bank，而且**零额外 Shared Memory 浪费**！',
-      'L3 Occupancy 误区：在 GEMM / FlashAttention 等 Compute-bound 算子里，往往为了用满每线程 128~255 个寄存器存更大矩阵 Tile（提高数据复用与指令级并行 ILP），Occupancy 故意压在 25%~50% 反而最快！',
+      'L2 对 float tile 写出 bank=(字地址 mod 32)，检查同一 warp 的不同 lane 到同一 bank 的不同字。再设计 padding 或局部位 XOR。',
+      'L3 占用率、spill、可发射 warp 与每线程数据复用要一起看。同一输入比较不同 tile 的正确性和总耗时。',
     ],
     followUps: [
       {
@@ -227,106 +213,106 @@ export const KERNEL_QUESTIONS = [
       },
       {
         stage: 'corner',
-        question: '追问 2（Triton vs CUTLASS/CUDA）：既然 Triton 写融合算子（如 RMSNorm/RoPE/CrossEntropy）又快又好维护，为什么像 FlashMLA、DeepGEMM、Marlin 这类顶级核心算子大家还是回归手写 CUDA / CUTLASS / PTX？Triton 在 Hopper/Blackwell 上的主要局限是什么？',
+        question: '追问 2（Triton 与 CUDA/CUTLASS）　同一 shape、dtype 下如何判断 Triton 生成代码是否满足 tile、流水和指令需求？哪些实测差距值得改成手写实现？',
       },
     ],
-    referenceAnswer: `### Staff 级 GPU 调优闭环
+    referenceAnswer: `### 从端到端步时找到限制
 
-#### 1. 自顶向下 Profiling 方法论
-1. **宏观体检 (\`nsys\` / PyTorch Profiler)**：先看 GPU Stream 覆盖率。若时间线上满是零散小算子和大量空白 Gap，说明是 **CPU Host Launch Bound**（上 **CUDA Graphs** 或 \`torch.compile\` / 算子融合）或 DataLoader/同步 \`cudaStreamSynchronize\` 卡顿。
-2. **微观解剖 (\`ncu\`)**：查看 **SOL (Speed of Light)** 指标判断 Compute vs Memory 瓶颈，并看 **Warp State Statistics**：
-   - \`Stall Long Scoreboard\`：正在干等 Global Memory / L2 数据返回 → 提高访存合并度、128-bit 向量化加载 (\`LDG.128\`)、引入 \`cp.async\` / TMA **双缓冲软件流水 (Software Pipelining)** 预取下一块数据；
-   - \`Stall Short Scoreboard\` / \`Mio Throttle\`：Shared Memory 带宽打满或严重 Bank Conflict。
+先固定输入形状、精度、正确性和 warm-up，记录稳态端到端时间。用 Nsight Systems 对齐 CPU 线程、CUDA API、stream/event、memcpy、collective 与 kernel。时间线有空档时，查谁在等谁：若 kernel 已就绪但 CPU 迟迟未发射，可比较 CUDA Graph 或融合。若在等输入、同步或另一条 stream，要处理相应依赖。
 
-#### 2. 经典 CUDA / Triton 底层优化手段
-- **Global Memory 合并访存**：确保同 Warp 32 线程访问连续地址（合并为最少 128B 事务），并用 \`float4\` / \`int4\` 单指令加载 16 Bytes 减少指令发射数。
-- **消除 Shared Memory Bank Conflict**：Shared Memory 分为 32 个 4-Byte Bank。避免按 32 步长跨行访问撞同 Bank；经典方法是对行宽做 **Padding**，工业界 SOTA（CUTLASS/FA）采用 **XOR Swizzling**（无额外 SMEM 开销且完美兼容 \`ldmatrix\`）。
-- **理性看待 Occupancy**：Memory-bound 算子需要较高 Occupancy（如 50%+）靠多 Warp 切换隐藏长访存延迟；Compute-bound 算子（GEMM/FA）更看重单线程寄存器 Tile 复用与异步流水线，Occupancy 在 25%~50% 往往已是全局最优。
-- **Triton 调优与边界**：用 Triton 写 RMSNorm/SwiGLU/Chunked-CE 极高效，核心调优 \`BLOCK_M/N/K\`、\`num_warps\` 与 \`num_stages\`（软件流水深度）；但在需要极致压榨 Hopper **Warp Specialization、PTX 细粒度寄存器分配、非规则位运算反量化 (Marlin) 或 IBGDA 通信融合 (DeepEP)** 时，仍需手写 CUTLASS/CUDA/PTX。`,
+对关键 kernel 用 Nsight Compute 查看实际 FLOPs、DRAM/L2 bytes、吞吐、eligible warps 和 stall。Long Scoreboard 表示在等 L1TEX 路径的依赖，可能是 global、local/spill 或 texture 访问。若带宽未满，还要查相关加载的延迟与并行性。Short Scoreboard 和 MIO Throttle 分别提示较短的依赖或 MIO 指令队列压力，需进一步查看冲突与指令指标。
+
+### 两个能在白板上算清的例子
+
+- **全局内存**。在常见 CC≥6.0 的合并访问模型下，32 个 lane 各取相邻的一个 float，总计 128 B。起点对齐 32 B 时覆盖四个 32 B sector。跨步、错位可增加 sector。相同线程改用 float4 要保证对齐和边界。它可减少指令数，却不会自动修复 lane 间的 stride。
+- **共享内存**。对 32×32 float tile，lane i 读第 i 行的同一列，行跨度 32 个字会落在同一 bank 的不同地址。把行宽改为 33 可分散到 32 个 bank。多个 lane 读同一字可以广播。对向量指令或矩阵加载按实际拆分的事务分析，可选与 tile 形状匹配的 XOR swizzle。
+
+**Occupancy 与工具选择**。寄存器和 SMEM 限制驻留 CTA，但较大 tile 可能提高数据复用。扫 BLOCK_M/N/K、num_warps、num_stages，对照耗时、寄存器 spill、内存事务和实测吞吐。Triton 是否已生成需要的指令和流水以当前后端代码及 profile 为准。可与 CUTLASS 或手写 kernel 在相同条件下比较。
+
+> 依据　NVIDIA《CUDA C++ Best Practices Guide》合并访存与共享内存章节，及 Nsight Compute《Profiling Guide》。`,
   },
   {
     id: 'kn-04',
     track: 'kernel',
-    title: 'GPU 架构代际演进：A100 -> H100 -> H200 -> GB200 NVL72 对 LLM 系统的颠覆',
+    title: 'GPU 规格与系统选型：A100、H100、H200、B200 与 GB200 NVL72',
     level: 'P7',
     frequency: '高频',
     incident: false,
     tags: ['A100', 'H100', 'H200', 'B200', 'GB200 NVL72', 'FP4', 'NVLink Domain'],
-    summary: '站在硬件第一性原理，对比四代核心 GPU 的算力、HBM 带宽/容量与 NVLink 域扩张如何重塑训练并行度与 MoE 推理形态。',
-    contextSpecs: ['A100 80G', 'H100/H200 141G', 'B200 192G 8TB/s', 'GB200 NVL72 (72-GPU NVLink)'],
-    prompt: '作为 AI Infra 架构师，硬件选型和提前适配下一代架构是核心职责。请对比 A100、H100、H200 到 Blackwell (B200 / GB200 NVL72) 四代 GPU 的关键硬件跃迁（算力格式、HBM 容量与带宽、互联域规模），并重点分析：**GB200 NVL72（72 张 GPU 在同一个 NVLink 全互联域内，总计 130 TB/s 聚合带宽、~13.8TB 统一 HBM3e）** 对大规模 MoE 推理和超长上下文训练带来了哪些架构级的颠覆？',
+    summary: '区分单 GPU、8 卡系统和 72 卡机柜规格，分析算力/HBM 配比、互连与 SLO 成本。',
+    contextSpecs: ['A100 SXM 80 GB', 'H100 SXM 80 GB / H200 SXM 141 GB', 'DGX B200：8 GPU', 'GB200 NVL72：72 GPU'],
+    prompt: '比较 A100 80 GB SXM、H100 SXM、H200 SXM、DGX B200 与 GB200 NVL72。请注明单卡还是整机柜、稠密还是稀疏峰值，以及 NVLink 带宽的统计口径。72 GPU 同一 NVLink 域对 MoE 和长上下文训练有什么收益和限制？如何按线上 SLO 比较成本？',
     rubric: [
       {
         id: 'specs-evolution',
-        label: '精准掌握四代核心参数：A100 (312TF BF16, 2TB/s, 80G) -> H100 (989TF BF16 / 1979TF FP8, 3.35TB/s, 80G) -> H200 (141G, 4.8TB/s) -> B200 (2.25PF BF16 / 4.5PF FP8 / 9PF FP4, 192G, 8TB/s)',
+        label: '分清 A100/H100/H200 SXM、DGX B200 和 GB200 NVL72，统一精度、dense/sparse 和设备计数',
         weight: 24,
-        keywords: ['a100', 'h100', 'h200', 'b200', '141', '192', '4.8', '8tb', 'fp8', 'fp4', '3.35', 'hbm3e'],
-        probe: '对比 H100 和 H200，计算核心完全没变，为什么很多团队在推理 70B/MoE 时愿意溢价买 H200？HBM 容量和带宽具体涨了多少？',
+        keywords: ['a100', 'h100', 'h200', 'b200', '141', '180', '13.4', '4.8', '8 tb', 'fp8', 'fp4', 'hbm3e'],
+        probe: '按同一 SXM 口径比较 H100 与 H200 的 HBM 容量、带宽和 dense 算力。对哪一类负载有帮助？',
       },
       {
         id: 'nvl72-domain',
-        label: 'GB200 NVL72 颠覆点 1：NVLink 互联域从单机 8 卡暴涨 9× 到整机柜 72 卡（每卡 1.8 TB/s 双向），打破了过去“TP/EP 尽量限制在 8 卡内”的铁律！',
+        label: '72 GPU scale-up 域、单 GPU 1.8 TB/s 双向聚合与系统 130 TB/s 的区别',
         weight: 26,
         keywords: ['nvl72', '72卡', '1.8', 'nvlink域', '打破', 'tp', 'ep', '单机8卡', '全互联', '130tb'],
-        probe: '过去十年我们背的八股都是“TP ≤ 8 限制在机内 NVLink，跨 8 卡就得走慢 10 倍的 IB”。到了 GB200 NVL72 上，这个架构前提发生了什么质变？',
+        probe: '两 GPU 间可用带宽、每卡聚合带宽和全机柜聚合值分别怎样解释？',
       },
       {
         id: 'nvl72-moe',
-        label: '对超大规模 MoE 推理的颠覆：671B/万亿级 MoE 可以在单个 NVL72 机柜内跑 EP72 全 NVLink 极速 All-to-All（彻底消除跨机 IB 瓶颈），同时压低 TPOT 与拉爆吞吐',
+        label: '说明 rack 内 EP/CP 的可行映射和限制，包括专家数整除、负载、消息大小及跨柜路径',
         weight: 22,
-        keywords: ['moe', 'ep72', 'all-to-all', 'ib', 'rdma', 'tpot', '万亿', '极低延迟', 'wide-ep'],
-        probe: '如果把 DeepSeek-R1 671B 或未来 2T 参数的 MoE 部署在 GB200 NVL72 上跑 Decode，EP72 全在 NVLink 域内执行有什么惊人收益？',
+        keywords: ['moe', 'ep', '专家', '整除', '副本', 'all-to-all', 'nvlink', '跨柜', 'tpot', 'wide-ep'],
+        probe: '若每层有 256 个路由专家，打算让 72 个 rank 各放同样数目的整专家，需要怎样映射？',
       },
       {
         id: 'fp4-ridge',
-        label: '算力增长快于内存带宽（Ridge Point 持续右移）：B200 原生 NVFP4/MXFP8 成为必选项，否则 Decode 严重吃不满暴涨的 Tensor Core',
+        label: '同精度计算 ridge，区分 W4A16、原生低精度与实际业务瓶颈',
         weight: 16,
         keywords: ['fp4', 'nvfp4', 'mxfp8', 'ridge', '内存墙', 'memory wall', '算力带宽比', '量化'],
-        probe: 'A100 -> H100 -> B200，算力涨了十几倍，但 HBM 带宽只涨了 4 倍（2TB/s -> 8TB/s）。算力带宽比越来越悬殊，这逼着 AI Infra 必须往哪些技术方向演进？',
+        probe: '分别计算 A100、H100、B200 的 BF16 ridge。更换到 FP4 时，哪些输入条件与 kernel 成本也发生了变化？',
       },
       {
         id: 'reliability-nvlink',
-        label: '新挑战：NVL72 单机柜液冷功耗高达 ~120kW、故障爆炸半径扩大到 72 卡域，需更强的机柜级容错、NVLink 子域隔离与液冷运维能力',
+        label: '评估液冷供电、故障域、可用率和达标 goodput 对成本的影响',
         weight: 12,
-        keywords: ['液冷', '功耗', '120kw', '容错', '爆炸半径', '可靠性', 'mtbf', '隔离'],
+        keywords: ['液冷', '供电', '功耗', '容错', '故障域', '可用率', '可靠性', 'mtbf', '隔离', '备用容量'],
         probe: 'NVL72 这么强，它给机房基础设施和分布式集群容错带来了什么新的棘手挑战？',
       },
     ],
     hints: [
-      'L1 方向提示：从“单卡算力与精度跃迁 (BF16->FP8->FP4)” + “HBM 墙与 H200/B200 扩容” + “NVLink 互联域从 8 卡跃迁到 72 卡”三条主线拆解。',
-      'L2 H200 性价比真相：H100 80G 跑 70B BF16 单卡放不下，跑 8 卡又有 TP 通信开销；H200 141G + 4.8TB/s (+43% 带宽, +76% 容量) 让推理并发 KV 暴涨、Decode 速度直接快 1.4× 以上！',
-      'L3 NVL72 质变：单机柜就是一台拥有 **13.8 TB 统一高速显存 + 72 卡 1.8TB/s 全 NVLink 互联** 的巨型“单机”！EP72 全走 NVLink/NVLS，彻底消除跨机 IB 瓶颈；甚至可以轻松做超大 TP/CP 支撑百万级 Context 实时交互。',
+      'L1 比较同精度、同稀疏性、同设备计数的峰值。再按 HBM、NVLink 与网络各自的路径看带宽。',
+      'L2 H200 SXM 的 141 GB、4.8 TB/s 相对 H100 SXM 的 80 GB、3.35 TB/s 提高了容量和理论带宽。端到端收益要看受限部分。',
+      'L3 GB200 NVL72 的 13.4 TB 是 72 张 GPU 的 HBM 总量。仍需显式放置参数、KV 和并行组。',
     ],
     followUps: [
       {
         stage: 'deepen',
-        question: '追问 1（NVFP4 vs W4A16）：Blackwell 推出了带微块缩放的 NVFP4（每 16 个元素共享一个 FP8 E4M3 Scale，外加二级 Tensor Scale）。相比传统 W4A16，NVFP4 硬件原生指令如何同时加速 Prefill 和 Decode？',
+        question: '追问 1（NVFP4 与 W4A16）　每 16 个值共享块 scale 的 NVFP4 与 INT4 解包后用 FP16 算的路径有何不同？怎样评估对 prefill 与 decode 的收益？',
       },
       {
         stage: 'corner',
         question: '追问 2（异构成本测算）：如果你们公司要采购一批推理算力跑在线 72B / DeepSeek-R1 服务，给你 H200、B200 和 H20 三种选项，你会从哪几个定量指标（$/M-Token 成本模型）做 TCO 选型决策？',
       },
     ],
-    referenceAnswer: `### Principal 级 GPU 硬件代际演进与系统影响
+    referenceAnswer: `### 规格先按同一口径读
 
-#### 1. 核心规格演进速查（SXM / 稠密算力）
-| 架构 | 关键算力 (Dense) | HBM 容量 & 带宽 | NVLink 域 & 单卡双向带宽 | 核心架构特性 |
-|---|---|---|---|---|
-| **A100** | 312 TF (BF16) | 80GB / 2.0 TB/s | 8 GPU / 600 GB/s | TF32, 基础 Async Copy |
-| **H100** | 989 TF (BF16) / 1979 TF (FP8) | 80GB / 3.35 TB/s | 8 GPU / 900 GB/s | TMA, WGMMA, Transformer Engine FP8 |
-| **H200** | 同 H100 | **141GB / 4.8 TB/s** | 8 GPU / 900 GB/s | Decode 带宽+43%、KV 显存暴涨，推理甜点卡 |
-| **B200 / GB200** | ~2.25 PF (BF16) / 4.5 PF (FP8) / **9 PF (FP4)** | **180GB (B200) / 192GB (GB200) · 8.0 TB/s** | **NVL72: 72 GPU / 1.8 TB/s** | 硬件原生 MXFP8 / NVFP4, 5th Gen NVLink Switch |
+下表按 NVIDIA 对应系统规格。前三行为单卡 SXM，Tensor Core 算力为**未启用结构化稀疏加速的 dense 峰值**。NVLink 数字为单 GPU 全部链路的双向聚合值。
 
-#### 2. GB200 NVL72 对 LLM 架构的三大颠覆
-1. **打破“单机 8 卡 NVLink 边界”**：72 张 GPU 处于同一个 1.8 TB/s 全互联 NVLink 域内（13.8 TB 显存池），彻底改写过去 3D 并行“TP/EP 不得超 8”的铁律！
-2. **MoE 推理终极形态（单机柜 EP72 全 NVLink）**：DeepSeek-R1 671B 及未来 1T~2T 万亿级 MoE 可以在单个 NVL72 内展开 **DP-Attention + EP72**，所有 Dispatch/Combine 全走 1.8TB/s NVLink 而零跨机 IB 延迟，兼得超高单卡吞吐与极低 TPOT (<10ms)。
-3. **百万 Context 与超高 Ridge Point 应对**：
-   - 超长上下文训练/Prefill 可在 72 卡 NVLink 域内做高速 Ulysses/Ring CP；
-   - 由于 B200 算力增长远快于 HBM 带宽，Ridge Point 进一步拉高（FP4 下高达 ~1125 FLOPs/Byte），**NVFP4 量化 + 投机采样 (MTP/EAGLE) + 大 Batch Wide-EP** 成为吃满算力的必选项。
+| GPU / 系统 | dense Tensor Core 峰值 | HBM 容量与本地带宽 | NVLink |
+|---|---|---|---|
+| A100 SXM 80 GB | BF16 312 TFLOP/s | 80 GB，约 2.04 TB/s | 600 GB/s |
+| H100 SXM 80 GB | BF16 989，FP8 1979 TFLOP/s | 80 GB，3.35 TB/s | 900 GB/s |
+| H200 SXM | BF16 989，FP8 1979 TFLOP/s | 141 GB，4.8 TB/s | 900 GB/s |
+| DGX B200 中的一张 B200 | BF16 约 2.25、FP8 4.5、FP4 9 PFLOP/s | 整机 8 卡共 1,440 GB、64 TB/s，即每卡 180 GB、8 TB/s | 1.8 TB/s |
+| GB200 NVL72 整柜 | 36 个 Grace Blackwell Superchip，共 72 GPU，算力应按整柜另查 | 全柜 **13.4 TB HBM3e、576 TB/s 聚合**，每 GPU 访问本地 HBM | 约 **130 TB/s** 全柜聚合 |
 
-#### 3. 落地新挑战与 TCO 选型
-- **液冷与爆炸半径**：NVL72 整柜功耗 ~120kW（强依赖直接液冷），且单卡故障可能波及 72 卡 NVLink 域，需配合 NVLink 分区隔离与更激进的在线容错架构。
-- **推理 TCO 核心公式**：决策不看单卡价格，而看 **\`$/Million-Tokens @ Target SLA (TTFT & TPOT)\`**——低延迟高并发复杂推理（如 R1）H200/GB200 凭借超高单卡带宽和 Wide-EP 占优；极致低成本离线批推或低并发长上下文场景，大显存高性价比卡（如 H20）有时 TCO 更低。`,
+远端 HBM 通过互连访问，延迟和带宽不同于本地 HBM。单次点到点传输也不能代入全柜 130 TB/s。
+
+- **同精度算拐点**。A100、H100、H200、B200 的 BF16 理想 ridge 分别约 153、295、206、281 FLOPs/byte，随 SKU 并非单调。H200 的容量与带宽适合权重或 KV 读取占主导的负载，需在实际 decode 中测 KV 压力与 HBM 流量。NVFP4 为原生低精度矩阵乘，需计块 scale、量化和质量。W4A16 通常解包到 16-bit MMA。
+- **拓扑设计**。把 EP dispatch/combine 或 CP 的 KV 交换放在 rack 内可减少 scale-out 通信。256 个专家无法在 72 rank 上等数放置整专家，可选支持的 EP 子组、不均匀映射或部署 32 份冗余副本凑为 288 个槽位。要核算热点、all-to-all 延迟和故障后恢复。长上下文另需核算按序列切分的激活、head 整除和 attention 的二次计算量。
+- **TCO 追问**。在相同模型质量、流量、上下文分布、TTFT/TPOT SLO 下记录有效输出 token/s。若整套服务每小时完整成本为 C，达标输出速率为 g，则每百万达标输出 token 成本为 C×10⁶/(3600g)。NVL72 的液冷、机柜供电和备用容量要计入 C。并行组是故障域，测节点故障后的恢复时间、剩余服务容量和可用率，再代入 g，分别实测各 SKU。
+
+> 依据　NVIDIA A100、H100、H200 产品规格，HGX / DGX B200 和 GB200 NVL72 系统规格表及其 sparse/dense 脚注。`,
   },
   {
     id: 'kn-05',
@@ -336,79 +322,73 @@ export const KERNEL_QUESTIONS = [
     frequency: '高频',
     incident: false,
     tags: ['Kernel Fusion', 'Liger-Kernel', 'Cross-Entropy', '128K Vocab', '显存优化'],
-    summary: '定量揭示大词表 (128K~256K) 训练中 LM Head Logits 显存爆炸的惊人真相，并拆解 Fused Linear Cross-Entropy 分块融合实现。',
-    contextSpecs: ['Vocab V=128K~256K', 'Logits [B·S, V] FP32', 'Liger-Kernel / Triton', 'Memory-Bound Fusion'],
-    prompt: '现代 LLM 词表越来越大（Llama-3 是 128K，Qwen/Gemma 达到 152K~256K）。很多工程师在 SFT / 预训练微调长文本（如 Batch Tokens = 32K）时发现：明明模型不大，但一到最后算 `LM Head + CrossEntropyLoss` 就瞬间多吃掉 **30~40 GB 显存**直接 OOM！请你定量算一下这几十 GB 显存是怎么冒出来的，并详细设计一个 **Fused Chunked Linear Cross-Entropy** 融合算子（以及 RMSNorm/RoPE/SwiGLU 融合）来彻底消除它。',
+    summary: '核算大词表投影的显存，比较 Liger 的 token 分块、Apple CCE 的片上规约和词表并行 CE。',
+    contextSpecs: ['T=32,768 个 token', 'V=131,072 或 152,064', 'FP32 物化算例', 'LM head W[V,H]'],
+    prompt: '单卡有 32,768 个 token，词表大小为 131,072（另可用 152,064 对照）。若 LM head 物化 FP32 logits，算出一份张量的大小，并说明何时反向还会有额外峰值。请设计按 token 分块的 Linear + Cross-Entropy，推导 dH、dW，比较 Apple CCE 与词表并行的实现。',
     rubric: [
       {
         id: 'logits-oom-math',
-        label: '定量推导显存爆炸：Token数 T=32K × 词表 V=152K × FP32 (4B) ≈ 19.5 GB，加上反向梯度 dLogits 再翻倍 ≈ 39 GB！',
+        label: 'T=32768、V=131072 时 FP32 logits 为 16 GiB。区分 dtype、缓冲寿命和真实峰值',
         weight: 26,
-        keywords: ['32k', '128k', '152k', '256k', 'fp32', '4字节', 'logits', '16gb', '20gb', '32gb', '40gb', '物化', '梯度'],
-        probe: '假设单卡一次前向有 32,768 个 Token，词表大小 128K，PyTorch 默认 `CrossEntropyLoss` 内部还要转成 FP32。单单前向 Logits 和反向 dLogits 就会吃掉多少 GB 显存？',
+        keywords: ['32k', '128k', '152', 'fp32', '4字节', 'logits', '16 gib', '18.5625', '32 gib', '物化', '梯度'],
+        probe: 'T=32,768、V=131,072 时，FP32 和 BF16 的一份 logits 各占多少 GiB？反向峰值还取决于什么？',
       },
       {
         id: 'chunked-ce',
-        label: 'Chunked Linear Cross-Entropy 核心思想：按 Token 维切小块 (如 chunk=4096)，逐块执行 Linear 算局部 Logits -> 立刻算 CE Loss 和梯度 dLogits -> 直接反传累加 dH 和 dW，绝不物化完整 [T, V] 张量！',
+        label: '沿 token 分块，逐块求 CE 与 dZ，从 dZ 求 dH 并累计 dW，避免物化全量 logits',
         weight: 28,
         keywords: ['chunk', '分块', '不物化', 'fused', '融合', '逐块', '原地', 'in-place', 'dh', 'dw', '累加', 'online'],
         probe: '既然前向不保存完整的 `[T, V]` Logits，那反向传播怎么算 `dH` (对隐藏态的梯度) 和 `dW` (对 LM Head 权重的梯度) 呢？',
       },
       {
         id: 'inplace-grad',
-        label: '原地覆盖梯度技巧：在每个 Chunk 内算完 CE 梯度 `softmax(z) - y` 直接原地覆写该小块 Logits Buffer，零额外峰值显存；甚至直接在前向阶段就顺手算出 Chunk 的梯度（若只求标量 Loss）',
+        label: '区分 Liger 分块复用缓冲、标量反向的预计算与 CCE 片上计算，说明剩余工作区',
         weight: 18,
         keywords: ['原地', 'in-place', '覆写', 'softmax', 'liger', 'cut cross-entropy', 'apple', 'cce', '峰值'],
-        probe: 'Liger-Kernel 和 Apple 的 Cut Cross-Entropy (CCE) 在前向和反向中如何进一步把临时显存压到几乎 0 MB？',
+        probe: 'Liger 的 chunk logits、CCE 的片上 tile 和两者都需保留的梯度各占什么空间？',
       },
       {
         id: 'elementwise-fusion',
-        label: '其他高频融合算子：RMSNorm、RoPE、SwiGLU 全是纯 Memory-Bound，通过 Triton 融合将多次 HBM 读写合并为单次读+单次写（消除中间张量物化）',
+        label: '融合可减少 RMSNorm、RoPE、SwiGLU 等的中间张量和启动次数，保留规约等必要读写',
         weight: 16,
         keywords: ['rmsnorm', 'rope', 'swiglu', 'triton', 'memory-bound', '读写', 'hbm', '中间张量', '融合'],
         probe: '除了 Cross-Entropy，Transformer 里还有哪些算子在 Liger-Kernel 里融合收益最高？它们的共同特征是什么？',
       },
       {
         id: 'tp-vocab',
-        label: '分布式扩展：在 TP 下结合 VocabParallelCrossEntropy，仅需 AllReduce 极小的标量 max 和 sum_exp (O(T))，无需 AllGather 完整 Logits',
+        label: '词表并行按 token 求全局 max、指数和与目标 logit，可合并 SUM，无需全词表 AllGather',
         weight: 12,
         keywords: ['vocab parallel', 'tp', 'allreduce', 'max', 'sum', 'online', 'megatron'],
         probe: '如果开启了 TP=8，LM Head 权重按词表维切分在 8 张卡上，算 CrossEntropy 时需要把 8 张卡的 Logits AllGather 拼起来吗？',
       },
     ],
     hints: [
-      'L1 方向提示：先算显存账 \`T × V × 4B\`（32K × 128K × 4B = **16 GB**，再加 Softmax 中间结果和反向梯度直接飙到 **32~48 GB**！）。',
-      'L2 Chunked 诀窍：把 \`[T, H]\` 按行切成 \`T/C\` 个小块（如 \`C = 4096\`）。每块临时算出的小 Logits 只有 \`4096 × 128K × 4B ≈ 2 GB\`（甚至切 1024 仅 500MB），在 Chunk 内就地算出 Loss 并顺带完成 \`dH_chunk = dLogits_chunk @ W\` 和 \`dW += H_chunk.T @ dLogits_chunk\` 累加，然后直接释放这块临时 Logits！',
-      'L3 CCE 更狠：Apple Cut Cross-Entropy 连小块 Logits 都不落 HBM，直接用类似 FlashAttention 的自定义矩阵乘 Kernel 在片上 SRAM 算出 \`logsumexp\`，把显存降到几 MB 级别！',
+      'L1 一道题统一口径：32,768 × 131,072 × 4 B = 2³⁴ 字节 = 16 GiB，BF16 为 8 GiB。',
+      'L2 W 为 [V,H] 时，Z_c=H_c Wᵀ，dH_c=dZ_c W，dW 累加 dZ_cᵀ H_c。4096 行、128 Ki 个词的 FP32 临时 logits 是 2 GiB。',
+      'L3 CCE 在片上计算 tile 的 logits，只向全局内存输出需要的统计，比较各自的重算、工作区和梯度。',
     ],
     followUps: [
       {
         stage: 'deepen',
-        question: '追问 1（前向直接算反向？）：在 Liger-Kernel 的 `FusedLinearCrossEntropy` 实现里，你会发现它在 `forward()` 阶段就已经把 `dH` 和 `dW` 算好存起来了，`backward()` 时只是简单乘上一个上游 `grad_output` 标量！为什么这种设计可行，又有什么局限（比如高阶导数或非标量 Loss）？',
+        question: '追问 1（前向预计算梯度）　对标量 sum/mean loss，Liger 的一类实现能在 forward 分块算好梯度。若 reduction=none 或需二阶导，为什么需要不同的实现？',
       },
       {
         stage: 'corner',
-        question: '追问 2（`torch.compile` 够不够用）：既然 PyTorch 2 已经有了 `torch.compile` (Inductor) 自动算子融合，为什么我们还是经常要单独引入 Liger-Kernel 或手写 Triton 算子？Inductor 融合不了什么？',
+        question: '追问 2（编译器融合）　对指定 PyTorch 版本与输入形状，如何检查 torch.compile 是否已经消除了完整 logits 物化？',
       },
     ],
-    referenceAnswer: `### Staff 级高吞吐融合算子设计
+    referenceAnswer: `### 先算一份张量，再讨论峰值
 
-#### 1. 为什么大词表 \`LM Head + CrossEntropy\` 瞬间吃掉 30~48 GB？
-- 设单卡 Token 总数 \`T = 32,768\`，词表 \`V = 152,064\`（Qwen），精度为 FP32（PyTorch CE 为防数值溢出需升 FP32）：
-  - 前向 Logits 张量：\`32,768 × 152,064 × 4B ≈ 19.9 GB\`；
-  - Softmax / LogSoftmax 缓存与反向 \`dLogits\` 再占 \`19.9 GB\` → **仅最后一层就吃掉 ~40 GB 显存**，直接击穿 80GB H100！
+T=32,768，V=131,072，FP32 的 [T,V] 为 2³⁴ 字节，即 **16 GiB**。BF16 为 8 GiB。V=152,064 时 FP32 为 **19,931,332,608 字节，即 18.5625 GiB**。若两份 FP32 大张量在同一时刻存活，则分别为 32 GiB 或 37.125 GiB。LM head 输出、CE 内部累加、返回梯度可以是不同 dtype，实际峰值还要看 autocast、后端、复用与释放时间。
 
-#### 2. Fused Chunked Linear Cross-Entropy 设计（Liger-Kernel / CCE 原理）
-1. **沿 Token 维分块 (Chunking)**：将输入隐藏态 $H \\in \\mathbb{R}^{T \\times d}$ 切为小块 $H_c \\in \\mathbb{R}^{C \\times d}$（例如 $C=4096$ 或 $2048$）。
-2. **逐块融合计算 + 原地梯度**：
-   - 计算局部 Logits：$Z_c = H_c W^T$（仅占 ~1~2 GB）；
-   - 调用 Triton **Fused Online Cross-Entropy Kernel**，在 SRAM 内一次遍历完成 \`max -> logsumexp -> loss\`，并**原地覆写** $Z_c \\leftarrow \\text{softmax}(Z_c) - y_c$ 得到梯度 $dZ_c$（零额外显存！）；
-   - 趁 $dZ_c$ 还在，立刻算出该块梯度：$dH_c = dZ_c W$，$dW \\mathrel{+}= dZ_c^T H_c$；
-   - 丢弃 $Z_c$，循环下一块！
-3. **效果**：峰值显存从 **40 GB 暴降到 < 2 GB（直降 95%+）**，且减少海量 HBM 写回，端到端吞吐反而提升 15%~20%！
-4. **更进一步（Apple Cut Cross-Entropy）**：借鉴 FlashAttention Tiling 思想，连分块 Logits 也不写入 HBM，在片上 SRAM 内完成矩阵乘点积与 \`logsumexp\` 规约，显存逼近 0 MB。
+### 分块反传要对全局有效 token 正确归一化
 
-#### 3. 为什么还需要手写 Triton / Liger-Kernel 而非全靠 \`torch.compile\`？
-- \`torch.compile\` (Inductor) 擅长 Pointwise/Reduction 局部融合（如 RMSNorm/SwiGLU），但难以自动推导出需要改变算法数学结构的**跨算子分块重排**（如 FlashAttention、Chunked Linear CE 的前向顺手算梯度）以及需要手工控制异步硬件原语的复杂 Kernel，且长变长动态 Shape 下有编译开销与 Recompile 抖动。`,
+令 W 为 [V,H]，对 C 行隐藏态形成 Z_c=H_c Wᵀ。以无类别权重、无 label smoothing 的标准 CE 为例，按行稳定计算 LSE−z_target。sum reduction 时 dZ_c=softmax(Z_c)−onehot(y)。mean 时除以**全批有效 token 数**，ignore_index 的行置零。可把 dZ_c 写回临时 Z_c 缓冲，随后算 dH_c=dZ_c W、累加 dW+=dZ_cᵀ H_c。C=4096、V=131,072 时 FP32 临时 logits 已是 2 GiB，整体训练还要加 dW、dH、累加和算子工作区。
+
+- **Liger 与 CCE**。对标量 loss，可在 forward 分块计算单位上游梯度对应的 dH、dW，backward 再乘同一个 grad_output。若上游是每 token 不同的权重，必须先逐行加权再汇总 dW，可在 backward 重算。高阶导数要有相应的可微反向。Apple CCE 在片上计算词表 tile，逐步归约 logsumexp 与目标 logit，避免将 chunk logits 写回 HBM。
+- **词表并行**。各 rank 持有部分词表。对每 token 全局 MAX，再 SUM 各分片 exp(z−max) 以及目标所在分片的目标 logit（其余 rank 贡献 0）。两个 SUM 可按算法合并。由此可求 loss 与本地 dZ，通信量级 O(T)。若 dH 要复制到各 rank，LM head 的反向还有独立的梯度归约。
+- **融合选型**。RMSNorm 的归约、RoPE 或 SwiGLU 的逐点运算都可能受益于少写一次中间张量。检查编译生成的 kernel、峰值快照和总步时，对照 eager/compile/专用实现，同时比较 loss、dH、dW 和掩码下的误差。
+
+> 依据　Liger Kernel（arXiv:2410.10989）、Cut Your Losses（2411.09009）及 Megatron Core 的 VocabParallelCrossEntropy 实现。`,
   },
 ];

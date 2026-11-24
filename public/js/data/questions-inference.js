@@ -13,24 +13,24 @@ export const INFERENCE_QUESTIONS = [
     rubric: [
       {
         id: 'paged-attn',
-        label: 'PagedAttention：将 KV Cache 切分为固定物理 Block，逻辑-物理 Block Table 映射消除外部碎片与预留浪费',
+        label: '固定大小的物理块和逻辑块表减少 KV 预留浪费，说明块内尾部碎片与共享条件',
         weight: 24,
         keywords: ['pagedattention', 'block', '块', '页表', 'block table', '碎片', '虚拟内存', '非连续', 'copy-on-write', 'cow'],
-        probe: '传统推理按 max_seq_len 预分配连续显存，内存浪费率往往超过 60%。PagedAttention 借鉴操作系统虚拟内存做了哪些映射？支持哪些共享优化？',
+        probe: '连续预留最大长度会浪费哪些空间？块表如何支持按需分配与共享？',
       },
       {
         id: 'cont-batch',
-        label: 'Continuous Batching (Iteration-level Scheduling)：每步 Decode 后立即释放已完成请求并插入新请求',
+        label: 'Continuous batching 在迭代边界更新活跃请求，按 token 与 KV 预算接纳新请求',
         weight: 22,
         keywords: ['continuous', 'iteration', '迭代级', '动态', 'orca', '插入', '完成', 'padding', '长尾'],
         probe: 'Static Batching 为什么吞吐极低？Iteration-level 调度下不同长度的序列怎么做 Attention 和 FFN 批处理？',
       },
       {
         id: 'chunked-prefill',
-        label: 'Chunked Prefill：将长 Prompt 拆成固定 Token Budget 块，与 Decode 请求混批 (Piggyback) 消除 TPOT 毛刺',
+        label: '按迭代 token 预算分块 prefill，与 decode 混批，解释 ITL、TTFT 和吞吐的权衡',
         weight: 24,
-        keywords: ['chunked prefill', '分块', 'tpot', '毛刺', '抖动', '混批', 'piggyback', 'token budget', 'sarathi', 'stall'],
-        probe: '如果突然来了一个 32K Prompt 的新请求，没有 Chunked Prefill 时正在 Decode 的几十个在线请求会发生什么？Chunked Prefill 为什么不仅消抖，还能白嫖 Decode 的权重搬运？',
+        keywords: ['chunked prefill', '分块', '混批', '合批', 'token budget', 'token 预算', 'itl', 'tpot', 'sarathi', 'piggyback'],
+        probe: '单引擎里突然插入 32K prompt 会怎样影响在途 decode？混批对权重读取和迭代耗时各有什么影响？',
       },
       {
         id: 'overhead-tradeoff',
@@ -41,45 +41,36 @@ export const INFERENCE_QUESTIONS = [
       },
       {
         id: 'preemption',
-        label: '显存满载抢占机制：KV Cache 耗尽时触发 Preemption（Recompute vs Swap-out 到 CPU）',
+        label: 'KV 块不足时的抢占、重算和可选换出，说明所举引擎与版本',
         weight: 14,
         keywords: ['preempt', '抢占', 'recompute', 'swap', '驱逐', 'oom', '重算'],
         probe: '当并发太高导致所有物理 KV Block 被占满、已有请求又要生成新 Token 时，vLLM 会怎么处理？',
       },
     ],
     hints: [
-      'L1 方向提示：PagedAttention 管“显存利用率”，Continuous Batching 管“请求进出不空等”，Chunked Prefill 管“长 Prefill 不阻塞 Decode 且拉高计算密度”。',
-      'L2 Piggyback 妙处：Decode 是 Memory-Bound（读一次模型权重只算几个 Token），把一个 Chunked Prefill 塞进同一个 Batch 后，Linear 层读一次权重同时服务 Prefill 和 Decode，算力利用率大涨且 Decode 延迟几乎不增！',
-      'L3 重复读代价：第 $k$ 个 Chunk 计算 Self-Attention 时必须重读前 $k-1$ 个 Chunk 的 KV Cache，因此 Chunk Size 不能切得太小（通常 512~4096 tokens）。',
+      'L1 分别看 KV 容量、每轮哪些请求进出和每轮可处理多少 token。',
+      'L2 一轮混批能让线性层在更多 token 之间复用权重。chunk 太大同样会拉长这轮 decode 的间隔。',
+      'L3 后续 chunk 仍需访问前缀 KV。用不同预算测 TTFT、逐 token 间隔和有效吞吐。',
     ],
     followUps: [
       {
         stage: 'deepen',
-        question: '追问 1（调度细节）：vLLM V1 架构重构中取消了原先的 Swap 机制而主要采用 Recompute 抢占，同时做了零开销 Async Scheduling 和 Persistent Batch，为什么工业界普遍认为 Recompute 比 Swap-out 到 CPU 更好？',
+        question: '追问 1（抢占）　以 vLLM v0.10.2 的 V1 默认重算为例，什么情况下重算历史前缀比把 KV 换出再换入便宜？',
       },
       {
         stage: 'corner',
-        question: '追问 2（极端场景）：在 128K 超长上下文场景下，Chunked Prefill 已经很难同时兼顾 TTFT 和 TPOT 了，为什么这时候要走向 Prefill-Decode (PD) 分离架构？',
+        question: '追问 2（长输入）　128K 请求与交互式 decode 混部时，如何判断继续调 chunk budget 还是拆 P/D 池？',
       },
     ],
-    referenceAnswer: `### Staff 级参考解析
+    referenceAnswer: `### 三种机制各管什么
 
-#### 1. PagedAttention：消除 KV Cache 显存碎片
-- 传统引擎按最大长度预分配连续显存，存在**内部碎片（预留未用）**和**外部碎片（内存空洞）**，显存浪费常达 60%~80%。
-- **PagedAttention** 仿照 OS 虚拟分页：将 KV Cache 划为固定大小的物理块（如 \`Block Size = 16\` tokens），每个请求维护逻辑块到物理块的 \`Block Table\`，按需动态分配，显存浪费降至 \`< 4%\`（仅尾块半满）；同时天然支持 **Beam Search / Parallel Sampling 的 Copy-on-Write** 及 **Automatic Prefix Caching (APC)**。
+- **PagedAttention 管 KV 的放置**。逻辑 token 块经 block table 指向固定大小的物理块，请求增长时按块申请。同规格池中可用任一空块，减少连续大块分配的外部碎片。每个独占序列的最后一块最多有 block_size−1 个空位。共享相同前缀的只读块，分叉后再写时可用 copy-on-write。块表、元数据和尾块仍占显存。
+- **Continuous batching 管请求进出**。在迭代边界释放已完成请求的槽位，按剩余 token 和 KV 预算补入请求。线性层可以合并不同请求的 token。Attention 按序列元数据保持请求间隔离。为 CUDA Graph 或内核对齐时仍可能 padding。
+- **Chunked prefill 管单轮工作量**。长 prompt 分多轮处理，剩余预算内可与 decode 合批，降低单个长 prefill 独占引擎的时长。较大 chunk 有利于 GEMM 和 prompt 吞吐，但在途请求可能等得更久。较小 chunk 增加调度开销，后续 chunk 还需读历史 KV。按真实到达率画 TTFT、ITL P99 与 goodput 曲线。
 
-#### 2. Continuous Batching (Iteration-Level Scheduling)
-- 不必等整个 Batch 里最长的请求吐出 EOS，在**每一次 Forward 迭代结束**时立刻踢出已完结请求、塞入等待队列中的新请求。
-- FFN/Linear 层将所有 Token 展平拼接为 2D 张量 \`[total_tokens, H]\` 彻底消除 Padding；Attention 层使用 FlashAttention Varlen / PagedAttention Kernel 处理变长序列。
+**抢占追问**。vLLM v0.10.2 的 V1 默认采用 recompute。比较被逐出请求的未命中前缀重算时间，与 KV 写出、读回及排队耗时。前缀长度、缓存命中和有效链路决定选哪条路径。若调遍单池预算仍达不到两类 SLO，可用同等 GPU 比较 PD 分离，并计入 KV 传输和低负载闲置。
 
-#### 3. Chunked Prefill（Sarathi-Serve / vLLM 标配）
-- **痛点**：一个 16K Prompt 的 Prefill 耗时可能达数百 ms~数秒，直接卡死同机所有正在进行的 Decode 请求（Generation Stall），导致 TPOT P99 飙升。
-- **机制**：为每次 Iteration 设定 \`max_num_batched_tokens\`（如 2048），长 Prompt 被切块与当前所有 Decode Token 拼入同一 Batch 执行。
-- **双重收益**：(1) 消除 TPOT 尖峰；(2) **Piggybacking**：Decode 原本读取全部权重的 HBM 带宽开销顺带摊薄到 Prefill Chunk 的大量 Token 上，Linear 层直接从 Memory-bound 拉向 Compute-bound。
-- **代价**：后序 Chunk 需重复从 HBM 读取前面 Chunk 的 KV Cache（$O(C^2)$ 次块读取），故 Chunk 不宜过小。
-
-#### 4. 追问要点
-- **Recompute vs Swap**：PCIe 带宽（~32-64 GB/s）远低于 HBM，且长文本重算 Prefill 在 Compute-bound GPU 上往往比 PCIe 来回搬运更快，同时架构大幅简化（vLLM V1 默认优先 Recompute）。`,
+> 依据　PagedAttention（arXiv:2309.06180）及 vLLM v0.10.2《Optimization and Tuning》。`,
   },
   {
     id: 'inf-02',
@@ -89,34 +80,34 @@ export const INFERENCE_QUESTIONS = [
     frequency: '高频必考',
     incident: false,
     tags: ['PD分离', 'DistServe', 'Mooncake', 'RDMA', 'KV Cache传输'],
-    summary: '解析 PD 分离为何是大规模推理标配，深入探讨 KV Cache 跨节点传输瓶颈、Layer-wise 流水传输及 PD 弹性配比调度。',
+    summary: '比较混部和 PD 分离的 SLO、KV 传输和资源配比，估算长 prompt 在给定链路下的传输时间。',
     contextSpecs: ['Prefill Pool + Decode Pool', 'RDMA / NIXL / Mooncake', 'TTFT / TPOT SLA', 'P:D 配比'],
-    prompt: '在超大规模在线推理服务（如高并发长输入 Chat / Coding 助手）中，DistServe、Mooncake、SGLang/vLLM Disaggregated Serving 都采用了 Prefill-Decode (PD) 分离架构。请说明为什么 Chunked Prefill 仍不能完全替代 PD 分离？PD 分离引入的最大新瓶颈是什么？工程上如何把 KV 传输延迟隐藏掉，并设计异构并行度与动态 P:D 配比？',
+    prompt: '长输入与交互式 decode 混部时，什么条件下值得改为 PD 分离？请比较可达 SLO 与成本，估算单请求跨节点 KV 流量，并说明如何设计传输流水、异构并行度和 P:D 配比。',
     rubric: [
       {
         id: 'pd-motivation',
-        label: '本质动机：Prefill (Compute-bound, 要高算力/低TP) 与 Decode (Memory-bound, 要高带宽/大Batch/大EP) 硬件需求与并行度解耦',
+        label: '按实测算力、带宽、显存和 SLO 分别选择 P/D 的硬件与并行度',
         weight: 24,
         keywords: ['compute-bound', 'memory-bound', '解耦', '干涉', '干扰', '并行度', 'tp', 'dp', 'ep', 'sla', 'ttft', 'tpot'],
-        probe: '除了消除 Prefill 对 Decode 的延迟干扰，PD 分离在“并行策略（如 TP/DP/EP）和硬件选型”上还带来了什么混部做不到的红利？',
+        probe: '分池后两侧可独立调整哪些参数？什么负载或拓扑会让混部更有利？',
       },
       {
         id: 'kv-transfer',
-        label: '核心新瓶颈：P 到 D 跨机传输海量 KV Cache（如 70B 32K 序列可达数 GB），依赖 RDMA GPUDirect / NIXL / Mooncake',
+        label: '估算逻辑 KV 与关键链路字节，区分传输引擎、直连路径与有效带宽',
         weight: 22,
         keywords: ['kv', '传输', 'rdma', 'gpudirect', 'nixl', 'mooncake', '带宽', '网络', '零拷贝'],
         probe: '算一下一个 70B GQA 模型 32K Prompt 的 KV Cache 有多大？如果走 400Gbps IB RDMA 要传多久？',
       },
       {
         id: 'layerwise-overlap',
-        label: '传输隐藏：Layer-wise 逐层异步传输（算第 i+1 层时传第 i 层 KV）+ 预分配 Decode KV 显存防死锁',
+        label: '分块或逐层重叠仅能隐藏部分传输。预留目标页并设置背压、超时和回收',
         weight: 22,
         keywords: ['layer-wise', '逐层', 'overlap', '异步', '流水', '掩盖', '预分配', '死锁', 'handshake'],
-        probe: '怎么避免 Prefill 全部算完才开始传 KV 导致 TTFT 翻倍？以及传之前如果 Decode 节点没显存了怎么办？',
+        probe: '首 token 和第二个 token 分别在哪个节点产生？KV 传输慢时会体现在哪个指标，目标节点没空间时怎样处理？',
       },
       {
         id: 'kv-cache-centric',
-        label: '以 KV Cache 为中心的全局缓存池（如 Mooncake KVCache Pool / CPU+SSD 分层缓存）跳过重复 Prefill',
+        label: '按兼容前缀复用跨节点 KV，比较远程读取与重新 prefill 的代价',
         weight: 16,
         keywords: ['cache pool', 'prefix', '缓存池', '分层', 'cpu', 'ssd', '命中', '路由', 'kvc'],
         probe: '多轮对话或 RAG 场景下，每次都重新做 Prefill 太贵了，Mooncake 这种 KVCache-centric 架构是怎么结合分布式缓存池进一步省 P 节点算力的？',
@@ -130,9 +121,9 @@ export const INFERENCE_QUESTIONS = [
       },
     ],
     hints: [
-      'L1 方向提示：PD 分离不只是“不抢占”，更是让 P 集群用小 TP/高算力卡吃满 TTFT，让 D 集群用大 Batch/高 HBM 带宽/Wide-EP 吃满吞吐与 TPOT！',
-      'L2 定量算例：70B GQA (L=80, n_kv=8, d=128, BF16=2B) 每 Token KV = `2×80×8×128×2 = 320 KiB`；32K 序列正好 `10 GiB`！400Gbps IB (50GB/s) 单向也要传 `~215ms`；若换成 DeepSeek MLA，每 Token 仅 ~70 KiB，传输直接降 ~4.5×！',
-      'L3 逐层传输：P 节点算完 Layer $l$ 立刻通过异步 RDMA Write 推送给 D 节点预留的物理 Block，实现计算与跨机传输近乎完全重叠。',
+      'L1 独立调整 P 的 prompt 服务率与 D 的输出服务率，结合端到端 SLO 选择 TP/DP/EP。',
+      'L2 80 层、8 KV head、head_dim=128、BF16 时为 320 KiB/token。32,768 个 token 的逻辑 KV 是 10 GiB。',
+      'L3 前一层 KV 就绪后即可尝试传输。比较生产和传输速度，并核对接收端页容量。',
     ],
     followUps: [
       {
@@ -144,25 +135,17 @@ export const INFERENCE_QUESTIONS = [
         question: '追问 2（异构硬件）：很多团队想用 H100/H800 做 Prefill、用 H20（算力低但 HBM 大、带宽高）做 Decode，这种异构 PD 方案在什么业务模型下 ROI 最高？有哪些落地坑？',
       },
     ],
-    referenceAnswer: `### Staff 级参考架构
+    referenceAnswer: `### 分离的收益要足以覆盖传输与排队
 
-#### 1. 为什么 Chunked Prefill 无法完全替代 PD 分离？
-- **强干扰与 SLO 耦合**：超长上下文（32K~128K）下，Chunked Prefill 要么切大块破坏 Decode TPOT，要么切小块导致重复读 KV 严重拖慢 TTFT。
-- **最优并行度与硬件画像完全不同**：
-  - **Prefill (Compute-bound)**：适合小 TP（减少通信）、高 FLOPS 卡（H100/B200），按 TTFT 扩展。
-  - **Decode (Memory-bound)**：适合大 Batch、大 KV 容量、高 HBM 带宽卡（H200/H20）以及 MoE 下的 **DP-Attn + Wide-EP**。混部被迫共用同一种并行度，两头妥协。
+共置时长 prefill 和在途 decode 争用同一执行时间。拆池后可分别按输入长度、输出并发、显存、TPOT 和 TTFT 选择硬件及 TP/DP/EP。长 prompt 通常能形成较大的 GEMM，小批 decode 常受权重或 KV 带宽限制。低流量、短输入或互连慢时，混部可能有更高的单位卡 goodput。
 
-#### 2. KV 传输瓶颈与 Layer-wise 隐藏
-- 70B GQA (80 层, 8 KV head, 128 维, BF16) 每 Token KV ≈ \`320 KB\`，32K 序列达 \`10 GB\`。
-- **优化手段**：
-  1. **GPUDirect RDMA (NIXL / Mooncake Transfer Engine)** 绕开 Host CPU 与内核拷贝；
-  2. **Layer-wise 逐层流水**：P 算完第 $l$ 层立即异步 RDMA Write 第 $l$ 层 KV 到 D 预留的 Block，算第 $l+1$ 层同时隐藏第 $l$ 层传输，总 TTFT 额外开销压缩到最后一层通信（几毫秒）；
-  3. **显存预约与背压 (Admission Control)**：P 开始算前先向 D 申请 KV 槽位（或采用 Pull 模式由 D 主动拉取），避免算完后 D OOM 造成算力白费与死锁；
-  4. **架构减负**：FP8 KV Cache 减半传输量；DeepSeek MLA 低秩压缩把 KV 缩到传统 GQA 的 1/5~1/10，天然利好 PD 分离。
+**算例**。80 层、8 个 KV head、每头 128 维、BF16 的 GQA，每 token 为 2×80×8×128×2=327,680 字节，即 320 KiB。32,768 个 token 共 **10 GiB**。全部字节经过一条 400 Gb/s 单向链路时，序列化下界是 10×2³⁰/(400×10⁹/8)≈**215 ms**。多 rail 若各走不重复的分片可并行。只传缺失前缀、TP 复制、协议、竞争和 layout 转换都会改变字节数或有效带宽。
 
-#### 3. 全局 KV 缓存池与动态 P:D 配比
-- **KVCache-Centric 调度（Mooncake）**：构建跨机 DRAM/SSD KV Cache 池，结合 Prefix-aware Router 将请求路由到缓存命中节点，直接跳过重复 Prefill。
-- **动态配比**：短输入长 CoT 业务 P:D 常为 \`1:3 ~ 1:5\`；长上下文 RAG 业务可达 \`2:1 ~ 4:1\`。采用共享模型权重的弹性实例支持低峰/潮汐时段动态切换 P/D 角色。`,
+- **传输路径**。先预留 D 的页与接收队列，按层或块登记完成事件，用支持的直连路径传 KV，超时或取消时释放两端资源。逐层流水只隐藏与计算重叠的部分。P 若直接返回首 token，移交变慢可表现为首到第二 token 的间隔变长。若等 D 就绪才返回，TTFT 也会增长。
+- **TP4→TP8**。以 8 个 KV head 为例，P 每 rank 有 2 个 head，D 每 rank 需 1 个。按全局层、head、token 块将对应片段送往目标页，核对 dtype、scale、布局和块大小。不连续布局需打包或转换，复制 KV 的布局还需扇出。
+- **缓存与配比**。Mooncake 将 KV 放入分层缓存池。路由时寻找与模型版本、token 前缀和位置配置相符的块，比较远程读取与本地重算耗时。只有已物化、仍有效的部分可跳过 prefill。设请求率 λ，需要处理的平均未命中输入和输出为 I、O，每个 P/D 实例在目标 SLO 下的服务率为 rP、rD，按平均吞吐估算，实例数下界分别为 ⌈λI/rP⌉、⌈λO/rD⌉，应再为峰值和排队 SLO 留余量。长输入短输出与长 CoT 应分别回放。异构卡按精度、KV 传输兼容性和每个达标请求的成本比较。
+
+> 依据　DistServe（arXiv:2401.09670）与 Mooncake（FAST ’25）。`,
   },
   {
     id: 'inf-03',
@@ -174,32 +157,32 @@ export const INFERENCE_QUESTIONS = [
     tags: ['KV Cache', 'GQA', 'MLA', '矩阵吸收', 'RadixAttention', 'SGLang'],
     summary: '定量推导 KV Cache 公式，深刻剖析 DeepSeek MLA 如何在推理 Decode 阶段通过矩阵吸收省掉巨大 KV 显存，并对比 Prefix Caching 树结构。',
     contextSpecs: ['MHA / GQA / MLA', 'Weight Absorption', 'SGLang Radix Tree', 'KV 显存公式'],
-    prompt: 'KV Cache 是长上下文和高并发推理最大的显存和 HBM 带宽杀手。请先写出标准 GQA 的单 Token KV Cache 显存公式；再深入解释 DeepSeek-V2/V3 提出的 MLA (Multi-Head Latent Attention) 在推理时为什么只需要缓存极小的压缩潜向量 c_KV？“矩阵吸收（Weight Absorption）”具体是怎么推导的，以及它和 RoPE 冲突是怎么解决的？最后对比一下 SGLang RadixAttention 如何复用前缀 KV。',
+    prompt: '给出 GQA 每 token 的 KV Cache 字节公式。DeepSeek-V2/V3 的 MLA 每层缓存哪些张量？从一头的打分和加权求和推导矩阵吸收，并解释 Decoupled RoPE 的作用。最后说明 SGLang RadixAttention 在多请求之间如何复用前缀。',
     rubric: [
       {
         id: 'kv-formula',
         label: '准确写出单 Token KV 显存公式：2 × L × n_kv × d_h × bytes（并能定量举例）',
         weight: 20,
-        keywords: ['2', 'l', 'n_kv', 'd_h', 'bytes', '公式', '320kb', '显存', 'b*s'],
+        keywords: ['n_kv', 'kv head', 'd_h', 'head_dim', 'bytes', '字节', '320 kib', '40 gib', '2×'],
         probe: '请先给出 GQA 场景下单 Token KV Cache 的精确字节公式？70B 模型 128K 长度单请求光 KV 就要占多少 GB？',
       },
       {
         id: 'mla-latent',
-        label: 'MLA 原理：将 KV 联合低秩投影到潜向量 c_KV (如 512 维)，仅缓存 c_KV + 解耦 RoPE 的 k_R (64 维)',
+        label: '低秩 MLA 缓存 c_KV 与共享的旋转 k_R，给出 V3 在指定精度下的维度与字节',
         weight: 22,
         keywords: ['mla', 'latent', '低秩', 'c_kv', '512', '压缩', '潜向量', '缓存'],
-        probe: 'MLA 相比 GQA 为什么既保住了近似 MHA 的表达能力，又把 KV Cache 压到了极低？实际缓存进显存的是哪两个张量？',
+        probe: 'MLA 用什么结构减少缓存？比较缓存大小时需要给出哪些模型维度？',
       },
       {
         id: 'weight-absorb',
-        label: '矩阵吸收 (Weight Absorption)：Decode 时把 W_UK 吸收进 W_Q (算 q·W_UK^T)，把 W_UV 吸收进 W_O，全程不解压展开完整 K/V',
+        label: '利用结合律将 K 上投影移到当前 query，将 V 上投影移到对潜向量加权求和之后',
         weight: 24,
-        keywords: ['吸收', 'absorb', 'absorption', 'w_uk', 'w_uv', 'w_q', 'w_o', '结合律', '不解压', '矩阵乘'],
+        keywords: ['吸收', 'absorp', 'absorb', '上投影', '加权求和', '潜空间', 'w_uk', 'w_uv', '结合律'],
         probe: '如果 Decode 每步都要把 c_KV 乘上 W_UK 还原成巨大的 K 和 V，那省下的只是容量、并没有省算力或带宽。MLA 推理时是怎么用“矩阵吸收”绕开还原 KV 的？',
       },
       {
         id: 'decoupled-rope',
-        label: 'Decoupled RoPE：RoPE 位置旋转矩阵位于 Q 和 K 中间破坏了矩阵吸收结合律，故拆出独立低维 k_R 施加 RoPE',
+        label: '相对位置旋转依赖历史位置，妨碍按 query 做一次固定吸收。RoPE 分支独立缓存',
         weight: 18,
         keywords: ['rope', '解耦', 'decoupled', '位置编码', '结合律', '不可交换', 'k_r', '64'],
         probe: '为什么不能直接对解压后的 K 施加标准 RoPE？DeepSeek 为什么要专门设计 Decoupled RoPE？',
@@ -209,43 +192,37 @@ export const INFERENCE_QUESTIONS = [
         label: 'SGLang RadixAttention：基于基数树 (Radix Tree) 管理共享前缀 KV 物理页 + LRU 淘汰与缓存感知调度',
         weight: 16,
         keywords: ['radix', '基数树', 'sglang', '前缀', 'prefix', 'lru', '复用', '多轮', 'agent', 'system prompt'],
-        probe: '在多轮对话、Few-shot 或 Agentic 树状搜索场景下，SGLang 的 RadixAttention 相比普通 Hash-based Prefix Caching 有什么调度优势？',
+        probe: '基数树和块哈希都能复用前缀。怎样找到可复用的块并兼顾命中率与排队公平性？',
       },
     ],
     hints: [
       'L1 方向提示：MLA 靠“低秩投影压缩状态”+“矩阵乘法结合律吸收上投影矩阵”+“解耦 RoPE 避开位置矩阵阻隔”三板斧。',
-      'L2 吸收推导：原本 $q_t^T (W^{UK} c_j^{KV}) = (q_t^T W^{UK}) c_j^{KV}$！先把 $W^{UK}$ 乘到当前步仅 1 个 Token 的 $q_t$ 上，就永远不用把历史几万个 Token 的 $c_j^{KV}$ 解压回高维！',
-      'L3 Prefill vs Decode：Prefill 阶段 $q$ 的序列也很长，吸收反而让 FLOPs 变大，因此实际引擎往往 **Prefill 不吸收（直接展开用标准 FA），Decode 阶段启用矩阵吸收（MQA-like 形态）**！',
+      'L2 对每个 head 按矩阵乘结合律重排 qᵀ(Uₖcⱼ)=(Uₖᵀq)ᵀcⱼ，再对历史位置打分。',
+      'L3 长 query 的 prefill 和单 query 的 decode 使用不同形状，比较是否展开 KV、潜空间维度和实测 kernel 性能。',
     ],
     followUps: [
       {
         stage: 'deepen',
-        question: '追问 1（Prefill vs Decode 差异）：矩阵吸收在 Decode 阶段简直是神技，但如果在 Prefill 阶段也盲目做矩阵吸收，计算量会发生什么变化？为什么 DeepSeek / SGLang 在 Prefill 和 Decode 会走两条不同的 Attention Kernel 路径？',
+        question: '追问 1（Prefill 与 decode）　两种形状下，直接展开 K/V 与在潜空间计算分别读写哪些张量、做多少运算？',
       },
       {
         stage: 'corner',
         question: '追问 2（Cache-aware Scheduling）：SGLang 在等待队列里有几十个不同 Prefix 的请求，如果简单按 FIFO 调度，可能会不断把刚算好的 Prefix Cache 给 LRU 淘汰掉（缓存抖动），应该怎么改调度顺序？',
       },
     ],
-    referenceAnswer: `### Staff 级参考解析
+    referenceAnswer: `### 比较逻辑缓存时先给出层数、维度和 dtype
 
-#### 1. KV Cache 显存公式与定量对比
-- **GQA 单 Token KV 显存**：
-  $$\\text{Bytes/Token} = 2 \\times L \\times n_{kv} \\times d_h \\times \\text{bytes}$$
-  - Llama-3 70B ($L=80, n_{kv}=8, d_h=128$, BF16)：\`320 KiB / token\` → 128K 单请求占 **40 GiB**！
-- **DeepSeek-V3 MLA** ($L=61, d_c=512, d_r=64$, BF16)：每 Token 只需缓存 $c_t^{KV}$ (512 维) + 解耦 RoPE $k_t^R$ (64 维) = \`576 × 2B × 61 ≈ 68.6 KiB / token\`（仅 70B 的 ~1/4.7，且模型总参大 10×！）。
+等维 K/V 的 GQA 每 token 为 2L × n_kv × d_h × b 字节。L=80、n_kv=8、d_h=128、b=2 时是 320 KiB，131,072 个 token 占 **40 GiB**。DeepSeek-V3 的 61 层 MLA 每层缓存 512 维联合潜向量 c 和共享的 64 维旋转 key。BF16 时是 61×576×2=70,272 字节，即 **68.625 KiB/token**。这是两种具体配置的全模型逻辑量，单卡还取决于 TP/PP、复制、缓存精度和页布局。
 
-#### 2. 矩阵吸收 (Weight Absorption) 与 Decoupled RoPE
-- 设潜向量 $c_j^{KV} \\in \\mathbb{R}^{d_c}$，上投影 $K_j = W^{UK} c_j^{KV}$，$V_j = W^{UV} c_j^{KV}$。
-- **吸收推导**：
-  $$q_t^T K_j = q_t^T (W^{UK} c_j^{KV}) = \\underbrace{(q_t^T W^{UK})}_{q_t' \\in \\mathbb{R}^{d_c}} c_j^{KV}$$
-  同样输出侧把 $W^{UV}$ 吸收到输出投影 $W^O$ 中。于是整个 Decode Attention 变成所有 Query Head 共享同一个低维 $c^{KV}$ 的 **MQA 形态**，HBM 访存量暴降，且完美契合 Tensor Core (FlashMLA)！
-- **为什么需要 Decoupled RoPE**：如果加了位置矩阵 $R_{t-j}$，表达式变为 $q_t^T R_{t-j} W^{UK} c_j^{KV}$，位置旋转矩阵卡在 $q_t$ 与 $W^{UK}$ 之间**破坏了结合律**无法吸收！因此 MLA 将 Query/Key 拆成 NoPE（做低秩吸收）和独立小维度 RoPE（仅 64 维共享 $k_t^R$）两路拼接。
-- **Prefill vs Decode 分流**：Prefill 序列很长，若直接吸收会导致多 Head 在 $d_c=512$ 维上重复计算、FLOPs 暴涨；故 **Prefill 解压后走标准 FlashAttention，Decode 走矩阵吸收 FlashMLA**。
+### 对每个 head 移动两个线性变换
 
-#### 3. SGLang RadixAttention
-- 用 **Radix Tree (基数树)** 索引已计算的 KV 物理页，边为变长 Token 序列，支持任意共享前缀的零拷贝复用（System Prompt、多轮历史、Tree-of-Thought）。
-- 配合 **Longest-Prefix-Match (LPM) 调度**：优先调度与当前缓存树匹配最长前缀的请求，最大化缓存命中率并配合叶节点 LRU 淘汰防缓存抖动。`,
+1. 设内容 key 为 Kⱼ=Uₖcⱼ。打分 qᵀKⱼ=(Uₖᵀq)ᵀcⱼ，可对当前 q 只做一次上投影的转置乘法。
+2. 设 Vⱼ=Uᵥcⱼ，attention 概率为 aⱼ，则 Σ aⱼVⱼ=Uᵥ(Σ aⱼcⱼ)。先在潜空间聚合，再上投影和输出映射。避免对每个历史位置物化完整 K/V，无需预先构造巨大的融合权重。
+3. 若内容分量也做 RoPE，qᵀRₜᵀRⱼUₖcⱼ 中的旋转随历史位置 j 改变，无法为所有 j 预先算一个变换后的 q。解耦后，内容打分走吸收路径，位置打分由旋转后的 qᴿ 与缓存 kᴿ 贡献，同一 softmax 合并。Decode 常受益于紧凑历史读取。prefill 的长 Q 可能更适合临时展开后使用普通 attention kernel，应按形状比较。
+
+**RadixAttention** 以 token 前缀建基数树，复用兼容模型、位置和缓存粒度下的已算 KV。最长前缀匹配有利于复用。还应为等待时间长的请求保留调度机会。页或块哈希也能做前缀缓存。共享存储节省 prefill 和容量，decode 端实际少读多少 HBM 取决于 kernel。
+
+> 依据　DeepSeek-V2（arXiv:2405.04434）及 SGLang（arXiv:2312.07104）。`,
   },
   {
     id: 'inf-04',
@@ -255,9 +232,9 @@ export const INFERENCE_QUESTIONS = [
     frequency: '高频必考',
     incident: false,
     tags: ['Roofline', 'Arithmetic Intensity', 'Ridge Point', 'H100', 'Batch Size'],
-    summary: '手算 H100 FP16/FP8 Ridge Point、Decode 与 Prefill 的计算强度 (OI)，并精确推导出 Batch Size 临界点。',
+    summary: '用 H100 SXM 上的理想权重流量估算 FFN 拐点，并给出 KV、激活和实际部署如何改变结论。',
     contextSpecs: ['H100: 989 TF / 3.35 TB/s', 'Ridge Point ~295', 'OI = FLOPs / Bytes', 'TTFT / TPOT'],
-    prompt: '请用 Roofline 模型定量推导：在 H100 (BF16 算力 989 TFLOPS，HBM3 带宽 3.35 TB/s) 上部署一个 70B Dense 模型 (BF16)，为什么 Batch=1 的 Decode 是严重的 Memory-Bound？随着 Batch Size 增大，大约到多大 Batch Size 时 FFN 线性层会跨过 Ridge Point 进入 Compute-Bound？请给出推导步骤。',
+    prompt: '使用 H100 SXM 的 BF16 dense 峰值 989 TFLOP/s 和 3.35 TB/s HBM 带宽，分析 70B Dense 服务中的一个本地 FFN 权重分片。为何 batch=1 的 decode 线性层算术强度低？在只计权重读取和计入激活读写两种模型下，分别怎样估计临界 batch？70B BF16 部署时需要另行满足容量约束。',
     rubric: [
       {
         id: 'ridge-point',
@@ -268,36 +245,36 @@ export const INFERENCE_QUESTIONS = [
       },
       {
         id: 'decode-oi',
-        label: 'Decode 线性层 OI 推导：权重 2P 字节，Batch=B 时计算 2PB FLOPs => OI = B (FLOPs/Byte)（忽略少量激活搬运）',
+        label: '说明只计权重读取时 OI≈2B/b_w，并给出含输入与输出流量的式子',
         weight: 26,
-        keywords: ['2p', '2b', 'oi', 'batch', 'b', '1 flop', '权重', '搬运', '2*p', 'b/2'],
-        probe: '对一个矩阵乘 Y = XW（W 占 2·M·K 字节，B 个 token 共做 2·B·M·K 次 FLOPs），它的算术强度 OI 和 Batch Size B 的精确关系是什么？',
+        keywords: ['2b', 'oi', 'batch', '算术强度', '权重', '激活', '搬运', '2p', '字节'],
+        probe: '对 [B,K] × [K,N] 的矩阵乘，把权重、激活读取和结果写出都计入，OI 怎样变？',
       },
       {
         id: 'batch-threshold',
-        label: '临界 Batch 推导：BF16 下 OI = B => 需 B ≈ 295 跨过 Ridge；FP8 下 OI 翻倍为 2B 且 Ridge 翻倍为 591 => 临界 Batch 依然约为 295！（W4A16 提前到 ~74）',
+        label: '用给定 dense 峰值估算 BF16、原生 FP8 和融合 W4A16 的理想拐点，区分实际性能',
         weight: 22,
         keywords: ['295', '300', '临界', '饱和', 'compute-bound', '计算密集', 'batch', 'fp8', '591', '590', '74'],
         probe: '照你刚才的公式，BF16 下 Batch 大约到多少才会从 Memory-Bound 变成 Compute-Bound？如果换成 FP8 呢，临界 Batch 会变大、变小还是基本不变？',
       },
       {
         id: 'kv-bound',
-        label: '点出 Attention 阶段不同：每个请求读独立 KV Cache，增大 Batch 无法复用 KV，Attention 始终是 Memory-Bound',
+        label: '独立序列的 KV 读取随 batch 增长，GQA 的同头组复用取决于 kernel',
         weight: 18,
         keywords: ['attention', 'kv cache', '无法复用', '独立', 'memory-bound', 'gqa', 'batch', '共享'],
         probe: '增大 Batch Size 可以让 Linear/FFN 层变 Compute-Bound，那 Self-Attention 层也会随着 Batch 增大变成 Compute-Bound 吗？为什么？',
       },
       {
         id: 'sla-tradeoff',
-        label: '工程约束：受限于单卡 KV 显存容量与 TPOT SLA，线上往往无法开到 300 Batch（或需量化/大EP/PD分离）',
+        label: '分析显存、共享前缀、实际带宽与 TPOT SLO 对有效 batch 和吞吐的限制',
         weight: 10,
-        keywords: ['tpot', 'sla', '延迟', '显存', '吞吐', 'o(1)', '上限'],
-        probe: '在到达临界 Batch 之前，增大 Batch 时每 Token 延迟 (TPOT) 变化不大而系统总吞吐线性增长，一旦超过临界点会发生什么？',
+        keywords: ['tpot', 'sla', 'slo', '延迟', '显存', '吞吐', '容量', '实际带宽', '通信时间'],
+        probe: '实测 TPOT、吞吐与 KV 容量怎样限制 batch？哪项监控可验证从带宽受限到算力受限的判断？',
       },
     ],
     hints: [
       'L1 方向提示：Roofline 核心就两个数——硬件拐点 $\\text{Ridge} = \\frac{\\text{Peak FLOPS}}{\\text{Mem BW}}$，以及算子计算强度 $\\text{OI} = \\frac{\\text{FLOPs}}{\\text{Bytes Moved}}$。',
-      'L2 黄金心算公式：BF16 Linear 层，参数量 $P$，权重字节 $2P$，处理 $B$ 个 Token 计算量 $2PB$，所以 $\\text{OI} = \\frac{2PB}{2P} = B$ FLOPs/Byte（若 FP8 权重为 $1P$ 字节，则 $\\text{OI} = 2B$，但 FP8 算力也翻倍，所以临界 Batch 同样在 ~295！）。',
+      'L2 BF16 的 B、FP8 的 2B 和 W4A16 的 4B 都是只计权重字节的近似。对比的算力峰值要取实际 MMA 指令对应的精度。',
       'L3 Attention 陷阱：Linear 权重是所有请求共享的，但 KV Cache 是每个请求私有的，因此增大 Batch 并不能提高 Decode Attention 的算术强度（除非共用 Prefix 或用 GQA/MLA 靠多 Query Head 复用同一份 KV！）。',
     ],
     followUps: [
@@ -310,26 +287,21 @@ export const INFERENCE_QUESTIONS = [
         question: '追问 2（GQA 的 Roofline 视角）：我们常说 GQA 省显存，其实从 Roofline 看它对 Decode Attention 算术强度也有本质提升。假设 GQA Group Size = 8（8 个 Q 共享 1 个 KV），Attention 的 OI 提升了多少倍？',
       },
     ],
-    referenceAnswer: `### Staff 级定量 Roofline 推导
+    referenceAnswer: `### 本地线性层的上界
 
-#### 1. 硬件 Ridge Point 计算（H100 SXM）
-- **BF16 拐点**：$\\text{Ridge}_{\\text{BF16}} = \\frac{989\\text{ TFLOPS}}{3.35\\text{ TB/s}} \\approx \\mathbf{295\\text{ FLOPs/Byte}}$
-- **FP8 拐点**：$\\text{Ridge}_{\\text{FP8}} = \\frac{1979\\text{ TFLOPS}}{3.35\\text{ TB/s}} \\approx \\mathbf{591\\text{ FLOPs/Byte}}$
+设 X 的形状为 [B,K]，W 为 [K,N]。一次乘加计 2 FLOPs。若每个输入从 HBM 读取一次、输出写回一次，OI = 2BKN/(b_w KN + b_x BK + b_y BN)，单位 FLOPs/byte。令 R=峰值 FLOP/s ÷ HBM byte/s。由此可求 B = R b_w KN / [2KN−R(b_x K+b_y N)]。只有分母为正才有有限交点。若权重远大于激活流量，退化为 OI≈2B/b_w。
 
-#### 2. Decode Linear 层 Arithmetic Intensity (OI)
-- 设线性层权重参数量 $P$，精度为 $b$ 字节（BF16: $b=2$, FP8: $b=1$, INT4: $b=0.5$）。
-- 处理 Batch = $B$ 个 Token（Decode 每请求 1 token）：
-  - **计算量**：$2 \\cdot B \\cdot P$ FLOPs
-  - **访存量**（权重占主导，忽略微小激活）：$b \\cdot P$ Bytes
-  - **计算强度**：$\\text{OI} = \\frac{2BP}{bP} = \\mathbf{\\frac{2B}{b}}$ FLOPs/Byte
-- **结论**：
-  - **BF16 ($b=2$)**：$\\text{OI} = B$。Batch=1 时 $\\text{OI}=1 \\ll 295$，算力利用率仅 **0.34%**，彻底 Memory-Bound！直到 **$B \\approx 295$** 才跨过拐点进入 Compute-Bound。
-  - **W4A16 ($b=0.5$, BF16 算力)**：$\\text{OI} = 4B$，临界点提前到 **$B \\approx 74$**，中小 Batch 吞吐/延迟暴涨 4×！
-  - **FP8 ($b=1$, FP8 算力翻倍)**：$\\text{OI} = 2B$，但 Ridge 也翻倍到 591，临界点依然在 **$B \\approx 295$**，大 Batch 极限吞吐翻倍！
+| 本地 GEMM 路径 | H100 SXM 理想 R | 只计权重时的 OI | 近似交点 B |
+|---|---|---|---|
+| BF16 dense | 989/3.35≈295 | B | 295 |
+| 原生 W8A8 FP8 dense | 1979/3.35≈591 | 2B | 295 |
+| W4A16，解包后用 FP16/BF16 MMA | 约 295 | 4B | 74 |
 
-#### 3. Self-Attention 的不同规律
-- Linear 权重跨 Batch 共享，而 **KV Cache 跨请求独立**，因此加大 Batch 不会提升普通 MHA Decode Attention 的 OI（永远是 ~1 FLOP/Byte 级别）。
-- **唯一能拉高 Decode Attention OI 的方法**：**GQA/MQA/MLA**（多个 Query Head 共享读取同一份 KV，将 OI 放大 $G$ 倍，如 GQA-8 放大 8×，MLA 吸收后更是直接放大 128×！）以及 **Shared Prefix Caching**（多个请求共用同一份 System Prompt KV）。`,
+**怎样读这些数**。B=1、BF16 时理想算力上界约为 3.35 TFLOP/s，即峰值的 0.34%。量化 scale、解包、缓存命中、实际 tile 和 kernel 效率都会改变交点。70B BF16 仅权重约 140 GB，一张 80 GB H100 装不下。分卡后应代入本地 K、N、通信时间与 batch。
+
+**Decode attention**。长历史、每请求一个 query 时，QK 和 PV 约做 4S n_q d FLOPs，主要读取 2S n_kv d b_kv 字节。若每份 KV 在 head 组内只读一次，OI≈2(n_q/n_kv)/b_kv，BF16 MHA 约 1，8:1 GQA 约 8。独立请求随 batch 增长，算量与 KV 字节同增。扩大 batch 前先预算每请求 KV 与总显存，按目标 TPOT 测达标吞吐，再用逐算子 HBM 字节和实际 FLOP/s 验证瓶颈。共享前缀只有在内核能复用其读取时才改变这项带宽账。
+
+> 依据　Roofline（Williams 等，2009）及 NVIDIA H100 SXM 规格，取关闭结构化稀疏的峰值。`,
   },
   {
     id: 'inf-05',
@@ -345,14 +317,14 @@ export const INFERENCE_QUESTIONS = [
     rubric: [
       {
         id: 'w4a16-vs-w8a8',
-        label: 'Roofline 选型核心：W4A16 减 4× 权重搬运适合中小 Batch Memory-bound；W8A8/FP8 激活硬件 2× 算力适合大 Batch / Prefill',
+        label: 'W4A16 降低权重流量，W8A8 还可使用相应低精度 MMA，按硬件和负载选型',
         weight: 26,
         keywords: ['w4a16', 'w8a8', 'memory-bound', 'compute-bound', 'batch', 'prefill', 'decode', '搬运', '2倍算力', 'tensor core'],
         probe: '为什么在 Prefill 阶段或大 Batch 离线批推场景，W4A16 有时反而比 FP8 甚至 BF16 还慢？',
       },
       {
         id: 'outliers-method',
-        label: '离群值机制：SmoothQuant 通过等效数学变换把激活离群值平滑迁移到权重；AWQ 根据激活幅度保护 1% 显著权重通道',
+        label: 'SmoothQuant 与 AWQ 的等价缩放、GPTQ 的校准误差补偿及其目标',
         weight: 22,
         keywords: ['outlier', '离群值', 'smoothquant', 'awq', '显著', 'salient', '通道', '平滑', 'scale', '迁移', 'gptq', 'hessian'],
         probe: '同样是处理激活值里的离群通道，SmoothQuant 和 AWQ 的核心思想分别是什么？',
@@ -362,14 +334,14 @@ export const INFERENCE_QUESTIONS = [
         label: 'W4A16 融合反量化 Kernel (如 Marlin)：在寄存器内 On-the-fly 反量化 INT4->FP16 再喂 Tensor Core，避免写回 HBM',
         weight: 20,
         keywords: ['marlin', '反量化', 'dequant', '融合', 'register', '寄存器', 'cutlass', 'kernel', '位运算', 'lop3'],
-        probe: 'W4A16 不能直接用 INT4 Tensor Core 乘 FP16，那实际 Kernel (比如 Marlin) 是怎么做到接近理论 4× 带宽提速且不拖慢算力的？',
+        probe: 'Marlin 的解包和反量化发生在哪里？哪些额外字节或运算会缩小理想收益？',
       },
       {
         id: 'fp8-advantage',
-        label: 'H100/B200 时代 W8A8-FP8 成为甜点：指数位天然容纳大动态范围、无需复杂校准集、同时加速 Prefill+Decode',
+        label: '比较原生 FP8 与 INT8 的格式、scale、校准、硬件与内核支持',
         weight: 18,
-        keywords: ['fp8', '动态范围', '校准', '无损', 'e4m3', 'h100', 'b200', 'blockwise'],
-        probe: '在 Hopper/Blackwell 卡上，为什么 W8A8-FP8 几乎全面取代了 W8A8-INT8 (SmoothQuant)？',
+        keywords: ['fp8', 'int8', '动态范围', '校准', 'e4m3', 'scale', 'h100', 'l40s', 'blockwise'],
+        probe: '哪些 GPU 和后端支持原生 FP8 GEMM？怎样判断 FP8 与 INT8 在当前模型上的精度和吞吐？',
       },
       {
         id: 'kv-quant',
@@ -380,37 +352,33 @@ export const INFERENCE_QUESTIONS = [
       },
     ],
     hints: [
-      'L1 方向提示：记住核心法则——W4A16 是“减访存不加算力”，W8A8 是“减半访存+算力翻倍”。',
-      'L2 离群值对比：SmoothQuant 是 $Y = (X \\cdot \\text{diag}(s)^{-1}) (\\text{diag}(s) \\cdot W)$ 把激活难点转移给权重；AWQ 发现只需保护 1% 对应大激活的显著权重通道（按通道放大再量化）就能大幅保精度。',
-      'L3 KV 分布：Key 在 Channel 维度存在显著离群值（适合 Per-Channel 量化），Value 在 Token 维度相对平稳（适合 Per-Token 量化）。',
+      'L1 先分清 weight-only、权重与激活均量化、仅压缩 KV 三种路径各自减少的字节与运算。',
+      'L2 SmoothQuant 以对角缩放在激活和权重间迁移量化难度，AWQ 依据激活统计选择保护显著权重的缩放。',
+      'L3 KIVI 的低比特方案根据实测分布，对 key 按通道、value 按 token 分组。FP8 缓存的 scale 粒度还取决于后端。',
     ],
     followUps: [
       {
         stage: 'deepen',
-        question: '追问 1（大 Batch W4A16 退化）：在 Marlin Kernel 中，随着 Batch 超过 ~64~128，为什么 W4A16 的加速比会快速回落，甚至在 Prefill 时慢于 BF16？瓶颈转移到了哪里？',
+        question: '追问 1（大 batch）　固定模型和硬件，逐步增加 batch。Marlin 相对 BF16 的加速比为何可能收窄，如何定位拐点？',
       },
       {
         stage: 'corner',
-        question: '追问 2（NVFP4 / W4A4）：Blackwell 支持硬件原生 FP4 Tensor Core (W4A4)，相比 W4A16 它解锁了什么能力？同时 W4A4 要上生产还必须解决什么精度难题（比如旋转变换 QuaRot / Hadamard）？',
+        question: '追问 2（NVFP4）　原生 W4A4 MMA 与 W4A16 的硬件数据通路有什么区别？如何测量激活也量化后的精度影响？',
       },
     ],
-    referenceAnswer: `### Staff 级量化选型与原理矩阵
+    referenceAnswer: `### 按实际压缩的对象选型
 
-#### 1. 核心量化方案选型对比
-| 方案 | 带宽压缩 | 峰值算力 | 最优场景 | 关键痛点 |
-|---|---|---|---|---|
-| **W4A16 (AWQ/GPTQ + Marlin)** | **4×** | 1× (BF16/FP16) | 端侧/小卡部署大模型、中小 Batch 低延迟 Decode | 大 Batch/Prefill 时片上反量化指令开销成为瓶颈，反而不如 FP8 |
-| **W8A8-INT8 (SmoothQuant)** | 2× | 2× (INT8 TC) | A100/L40S 等无 FP8 Tensor Core 的上一代卡 | INT 线性分布对离群值极度敏感，依赖校准集与平滑因子 |
-| **W8A8-FP8 (E4M3)** | 2× | 2× (FP8 TC) | **H100/H200/B200 生产首选**：Prefill+Decode 通吃 | 仅支持 Ada/Hopper+ 架构；需注意细粒度 Scale 保精度 |
-| **FP8 KV Cache** | KV 2× | — | 高并发、长上下文显存受限场景 | 与 W8A8-FP8 叠加近乎无损，放大 2× 最大并发 Batch |
+| 路径 | 省在哪里 | 主要代价和验证 |
+|---|---|---|
+| W4A16 | FP16/BF16 权重载荷由 2 B/元素降至约 0.5 B，加上 group scale、零点和对齐 | Marlin 类 kernel 在片上解包和反量化后用 16-bit MMA。小 batch 权重读取占主导时收益较大，prefill 须测解包和算力瓶颈 |
+| W8A8 INT8 / FP8 | 8-bit 权重，支持时可用原生低精度矩阵乘 | 查 GPU、后端、累加类型和 scale 粒度。A100 支持 INT8 TC。Ada L40S 与 Hopper H100 都有 FP8 TC。存得下 FP8 文件和执行原生 FP8 GEMM 是两个条件 |
+| FP8 KV | BF16 KV 主体字节减半 | 检查 scale、attention 内核、长上下文质量与每请求峰值。权重、临时工作区与元数据仍占空间，应实测可承载并发 |
 
-#### 2. 离群值处理与高效反量化 Kernel
-- **SmoothQuant**：观测到激活通道有剧烈离群值而权重平坦，通过数学等价变换 $Y = (X \\cdot S^{-1})(S \\cdot W)$ 把量化难度平滑分摊给权重。
-- **AWQ**：通过激活幅度识别 1% 显著权重通道，不直接混精度（对硬件不友好），而是对显著通道乘以最优缩放系数 $s > 1$ 减小其量化相对误差。
-- **Marlin Kernel (W4A16)**：将 INT4 权重异步加载进 Shared Memory/Register，在寄存器中利用位运算（\`lop3\`/FP16 指令技巧）**即时融合反量化**并直接送入 Tensor Core MMA，彻底消除反量化写回 HBM 的带宽开销，在小 Batch 下可跑出接近 3.8× 的实测提速；但一旦进入 Compute-bound 大 Batch，反量化 ALU 指令会抢占发射周期，导致效率落后于硬件原生 FP8/FP4。
+**离群值处理**。SmoothQuant 利用 XW=(XS⁻¹)(SW)，将部分激活通道的范围移到权重上，便于 W8A8。AWQ 依据激活统计选权重通道的缩放，降低显著权重的量化误差，保留规则低比特存储。GPTQ 用校准激活近似二阶信息，逐步量化并补偿剩余权重误差。三者的校准目标有别。FP8 仍有饱和与舍入，要比较静态校准和动态 scale。KIVI 的低比特 KV 设计对 key 用 per-channel、对 value 用 per-token，可作为候选。
 
-#### 3. KV Cache 量化特征
-- **Key**：Channel 维离群明显 → 优先 Per-Channel（或配合 RoPE 前量化）；**Value**：分布平滑 → Per-Token。在 H100 上直接用 E4M3 FP8 KV Cache 配合动态 Per-Tensor/Per-Head Scale 已能做到 <0.2% 精度损失。`,
+**验证与 W4A4 追问**。同一流量回放中分开测 prefill 吞吐、decode ITL、峰值显存、任务质量与长文本检索。大 batch 权重复用充分时，W4A16 仍在做高精度乘法，不能从位宽推导端到端四倍。Blackwell NVFP4 可让两侧都走低精度 MMA，需测分块 scale、激活异常值、量化开销和质量。
+
+> 依据　SmoothQuant（arXiv:2211.10438）、AWQ（2306.00978）、GPTQ（2210.17323）、KIVI（2402.02750）及 NVIDIA L40S 规格。`,
   },
   {
     id: 'inf-06',
@@ -420,16 +388,16 @@ export const INFERENCE_QUESTIONS = [
     frequency: '高频',
     incident: false,
     tags: ['Speculative Decoding', 'EAGLE', 'MTP', 'Tree Attention', '无损验证'],
-    summary: '深入 Rejection Sampling 无损验证机制、Tree Verification、MTP 训练推理一体，以及大 Batch 下投机采样失效的 Roofline 根因。',
+    summary: '推导随机投机验证的分布、期望产出和净速比，区分 EAGLE 各代与 MTP。',
     contextSpecs: ['Draft + Verify', 'Lossless Distribution', 'EAGLE-2/3 / DeepSeek MTP', 'Acceptance Rate α'],
-    prompt: '投机采样（Speculative Decoding）能把低并发下的单请求生成速度提升 2~3 倍。请解释：(1) 它是如何在理论上严格保证输出分布与原 Target 模型**完全无损等价**的？(2) 相比早期独立的草稿小模型，EAGLE 和 DeepSeek MTP (Multi-Token Prediction) 做了哪些架构演进？(3) 为什么高并发大 Batch 时投机采样收益急剧下降甚至产生负优化？',
+    prompt: '草稿模型先生成 K 个 token，目标模型并行验证。随机采样如何保持指定目标分布？与独立 draft 相比，EAGLE 各代和 DeepSeek-V3 MTP 提供了怎样的候选？结合接受长度、验证成本和 batch 讨论何时值得开启。',
     rubric: [
       {
         id: 'draft-verify',
-        label: '核心原理：利用 Decode Memory-Bound 空闲算力，小模型串行草拟 K 个 Token，大模型单次 Forward 并行验证 K+1 个位置',
+        label: '草拟 K 个条件 token，在一个 target pass 得到验证及额外采样分布，明确成本假设',
         weight: 22,
         keywords: ['memory-bound', '空闲算力', '并行验证', 'draft', 'verify', 'k+1', '一次前向', '带宽'],
-        probe: '为什么 Target 大模型一次验证 5 个 Token 的耗时几乎和只算 1 个 Token 一样？这背后利用了什么硬件特性？',
+        probe: '为什么验证若干位置有时比逐次 decode 便宜？什么条件下验证耗时会明显增加？',
       },
       {
         id: 'rejection-sampling',
@@ -440,17 +408,17 @@ export const INFERENCE_QUESTIONS = [
       },
       {
         id: 'eagle-mtp',
-        label: '演进：EAGLE 复用 Target 倒数第二层隐藏态 Feature + 轻量预测头 + 动态 Tree Attention；MTP 在预训练阶段即联合训练多步预测模块',
+        label: '区分 EAGLE 特征预测、EAGLE-2 动态树、EAGLE-3 多层特征直接预测 token 和 MTP 联合预训练',
         weight: 22,
         keywords: ['eagle', 'mtp', 'feature', '隐藏态', 'hidden', 'tree', '树状', 'medusa', '预训练', '联合训练'],
-        probe: '独立小模型当 Draft 需要额外维护词表对齐和独立 KV Cache。EAGLE 和 DeepSeek-V3 的 MTP 分别是怎么突破这个限制的？',
+        probe: 'EAGLE、EAGLE-2、EAGLE-3 和 V3 MTP 分别怎样提供候选？草稿侧还需维护哪些状态？',
       },
       {
         id: 'large-batch-fail',
-        label: '大 Batch 失效根因：总验证 Token 变为 B×(K+1)，迅速跨过 Ridge Point 变 Compute-Bound，被拒绝的 Token 变成纯粹的算力浪费',
+        label: '随验证宽度和 batch 评估接受产出与成本，考虑 MoE 新增专家和 KV 带宽',
         weight: 20,
-        keywords: ['大batch', 'ridge', 'compute-bound', '浪费', '负优化', '高并发', '吞吐', 'b*(k+1)'],
-        probe: '如果在线服务 Batch Size 已经到了 128，再开 K=4 的投机采样，有效 Batch 变成了 640，此时为什么吞吐反而下降、延迟上升？',
+        keywords: ['高 batch', '高并发', 'ridge', 'compute-bound', '额外专家', '验证', '接受长度', '吞吐', 'b(k+1)', '算力'],
+        probe: '给定 batch=128、K=4，如何用接受长度和验证耗时判断开启后吞吐会升还是降？',
       },
       {
         id: 'kv-rollback',
@@ -462,36 +430,30 @@ export const INFERENCE_QUESTIONS = [
     ],
     hints: [
       'L1 方向提示：投机采样本质是用“过剩的 Tensor Core FLOPS”去换“稀缺的 HBM 权重带宽读取次数”。',
-      'L2 无损采样：以 $\\min(1, p(x)/q(x))$ 接受；拒绝后从 $\\text{norm}(\\max(0, p(x)-q(x)))$ 重采——全概率公式展开后 $P(x) = q(x)\\min(1, p/q) + (1-\\beta)\\frac{\\max(0,p-q)}{1-\\beta} = p(x)$！',
-      'L3 演进对比：Medusa 预测头之间独立（难捕捉条件依赖）；EAGLE 引入 Target Feature 级联自回归并构造动态置信度树（Tree Attention 一次并行验多个候选分支）；MTP 把轻量解码层放进预训练主流程，推理零额外训练成本。',
+      'L2 对每个 token，把 q 采到并被接受的质量 min(p,q) 与拒绝后补回的正部 (p−q)₊ 相加。',
+      'L3 EAGLE-2 改变草稿树的构造。EAGLE-3 改为多层特征和直接 token 预测。MTP 可复用预训练得到的额外模块，推理时依然消耗计算。',
     ],
     followUps: [
       {
         stage: 'deepen',
-        question: '追问 1（期望加速比）：假设单步接受率 $\\alpha = 0.8$，Draft 步数 $K = 4$，Draft 模型单步耗时是 Target 的 $c = 0.08$ 倍。大概能算一下期望每次验证产出多少个 Token，以及理论净加速比是多少吗？',
+        question: '追问 1（期望速比）　假设未到 EOS，各位置在前面全部接受的条件下接受率均为 0.8，K=4，draft 每步成本为普通 target decode 的 0.08，一次 verify 成本为 1。每轮期望产出和理想净加速比是多少？',
       },
       {
         stage: 'corner',
         question: '追问 2（MoE + 投机采样）：在 MoE 模型（如 DeepSeek-R1）里开 MTP 投机采样，除了常规计算量增加，对 MoE 路由专家激活数量和显存读取有什么意想不到的负面影响？',
       },
     ],
-    referenceAnswer: `### Staff 级参考解析
+    referenceAnswer: `### 为什么随机采样仍服从目标分布
 
-#### 1. 严格无损的 Rejection Sampling 推导
-- 设目标模型分布 $p(x)$，草稿模型分布 $q(x)$。对草稿生成的 token $x \\sim q(x)$：
-  1. 以概率 $\\min\\left(1, \\frac{p(x)}{q(x)}\\right)$ **接受**；
-  2. 若被**拒绝**，则从修正残差分布 $p'(x) = \\text{norm}(\\max(0, p(x) - q(x)))$ 重采样一个替换 token，并截断后续草稿。
-  3. 若 $K$ 个全部接受，目标模型最后一个位置本身还会免费吐出第 $K+1$ 个 token。
-- 由全概率公式可得任意 token 的最终生成概率严格等于 $p(x)$，**数学 100% 无损**。
+对同一已接受前缀，p 是要复现的目标分布，q 是草稿实际采样分布，含各自使用的温度、截断和归一化。从 q 抽到 x 时以 min(1,p(x)/q(x)) 接受。首次拒绝时按归一化的正部 (p−q)₊ 抽替换 token，并停止验证此后草稿。每个 x 的总概率为 min(p(x),q(x)) + (p(x)−q(x))₊ = p(x)。若 K 个全收，再从目标分布抽一个 bonus token。该证明针对链式、正确校正的 sampler。贪心验证比较 argmax，树式多候选需相应验证规则。同分布不要求固定随机种子生成同一串。
 
-#### 2. 架构演进：Draft Model -> EAGLE -> MTP
-- **传统 Draft Model**：需另训同词表小模型，单独占 KV，特征对齐弱。
-- **EAGLE / EAGLE-2/3**：直接复用目标模型倒数第二层高维 Hidden Feature + 极轻量 1 层解码器做 Feature 级自回归预测（保留上下文不确定性信息），并基于 Token 置信度动态构建 **Token Tree**，用自定义 **Tree Attention Mask** 在单次 Verify 中并行验证几十个分支，接受长度拉升至 4~6+ tokens/step。
-- **DeepSeek MTP**：在 Pre-training 阶段直接挂载轻量顺序预测头（共享 Embedding 与 Output Head），既提升模型表征能力，推理期即插即用实现无损加速。
+### 算例与实现
 
-#### 3. 大 Batch 失效与 MoE 陷阱
-- **大 Batch Roofline 失效**：验证有效 Token 数为 $B(K+1)$。当 $B$ 已接近 Ridge Point 时，验证从免费白嫖变成真正的 Compute-bound，未命中分支消耗的全是纯 FLOPs，吞吐反降。工程上需**根据当前 Batch Size 动态开关/缩减 $K$**。
-- **MoE 额外代价**：同一请求验证 $K+1$ 个 Token 可能路由到完全不同的专家集合，导致单步需从 HBM 加载的活跃专家权重变多（放大了 Memory-bound 读权重压力），因此 MoE 场景一般选择较小的 $K=1\\sim 2$（如单步 MTP）。`,
+- **期望产出**。当每个仍在验证的位置条件接受率都是 α，忽略 EOS，E=1+α+…+αᴷ。K=4、α=0.8 时为 **3.3616 tokens/轮**。若单次 verify 相对普通 target 步为 v，draft 步成本 c，则理想加速为 E/(v+Kc)。v=1、c=0.08 得 **2.55×**。线上应测 v、实际接受前缀长度和调度成本。
+- **候选从哪来**。原始 EAGLE 用目标高层特征及前移的 token 信息做特征级自回归。EAGLE-2 增加随上下文变化的草稿树。EAGLE-3 融合低、中、高层特征并直接预测 token。V3 的 MTP 在预训练时训练顺序预测模块、共享 embedding 和输出头。候选质量和验证规则共同决定收益与分布。
+- **KV 和吞吐**。树 mask 只允许看到共同前缀与本分支祖先。保留已接受路径实际计算的 KV，截断无效后缀、释放或复用其页。替换或 bonus token 的 KV 在其真正前向时补齐。高 batch 时验证可能争用算力、KV 或跨机链路。MoE 一轮还可能激活更多不同专家。应随负载比较多种 K（含关闭）的端到端吞吐与 ITL。
+
+> 依据　Fast Inference from Transformers via Speculative Decoding（arXiv:2211.17192）、EAGLE-3（2503.01840）及 DeepSeek-V3 第 2.2 节。`,
   },
   {
     id: 'inf-07',
@@ -501,75 +463,72 @@ export const INFERENCE_QUESTIONS = [
     frequency: '高频必考',
     incident: false,
     tags: ['DeepSeek-R1', 'Wide-EP', 'DP Attention', 'Two-Batch Overlap', 'EPLB'],
-    summary: '剖析 671B MoE 推理为何放弃纯 TP 而转向 DP Attention + EP32/EP64，并讲透双批次重叠 (TBO) 与冗余专家负载均衡 (EPLB)。',
-    contextSpecs: ['671B MoE / 256 Experts', 'DP Attention + EP64/EP320', 'Two-Batch Overlap', 'EPLB 冗余专家'],
-    prompt: '要把 DeepSeek-R1 (671B FP8，256 路由专家 + MLA) 部署成高吞吐在线服务，为什么不能像部署 70B Dense 那样简单用单机 TP=8 或跨机 TP=16？DeepSeek 官方推理架构提出的「Attention 用 DP + MoE 用超大规模 EP (如 EP32/EP144/EP320) + Two-Batch Overlap + 冗余专家 (EPLB)」分别解决了什么核心矛盾？',
+    summary: '以 DeepSeek 公开的 EP32/EP144 部署分析 MLA KV、专家负载、双批重叠和冗余副本。',
+    contextSpecs: ['671B MoE / 256 routed experts', '示例 P: EP32 / D: EP144', 'Two-Batch Overlap', 'EPLB'],
+    prompt: '为 DeepSeek-R1 671B 设计在线推理拓扑。比较纯 TP 与 DP Attention + Wide-EP 对单卡权重、MLA KV、每专家 token 数及跨机通信的影响。以 DeepSeek 公开的 EP32 prefill / EP144 decode 部署为例，解释 Two-Batch Overlap 和冗余专家的作用及边界。',
     rubric: [
       {
         id: 'dp-attn',
-        label: 'DP Attention 替代 TP Attention：避免 MLA 压缩后的单一潜向量 KV Cache 在 TP 间被重复存储 N 份，释放海量 KV 显存拉大 Batch',
+        label: '普通 head TP 可能复制 MLA cache。按请求做 DP Attention 改变 KV 和 attention 权重的放置',
         weight: 24,
         keywords: ['dp attention', 'mla', 'kv重复', '复制', '不切分', '显存', 'batch', 'tp'],
-        probe: '在 MLA 架构里，所有 Head 共享一个 512 维的 c_KV。如果 Attention 开 TP=8，会发生什么非常浪费的事情？改用 DP Attention 带来什么收益？',
+        probe: '常见 MLA 的 head TP 怎样存共享潜向量？把不同请求分给不同 attention rank 后，权重和 KV 的放置各怎样变化？',
       },
       {
         id: 'wide-ep',
-        label: 'Wide-EP (大专家并行，每卡只放少数专家)：大幅压缩单卡权重显存、减少每步从 HBM 加载的专家权重，并聚合多 DP 组 Token 拉高单专家 Grouped GEMM Batch Size',
+        label: '区分每卡专家数、每专家 token 数和总 batch，比较专家复制/分片与 All-to-All',
         weight: 24,
         keywords: ['wide-ep', 'ep', '专家并行', '单卡权重', 'grouped gemm', '算术强度', '聚合', 'batch', 'memory-bound'],
-        probe: '单机 8 卡跑 256 个专家时，每卡要放 32 个专家权重，Decode 阶段单个专家分到的 Token 寥寥无几。把 EP 拉宽到 32 甚至 144 张卡，单卡的显存和计算密度会发生什么质变？',
+        probe: '固定全组 token 数与固定每卡 token 数时，扩大 EP 对每专家批量的影响分别是什么？',
       },
       {
         id: 'tbo',
         label: 'Two-Batch Overlap (TBO / Micro-batch Ping-Pong)：将请求拆成两微批交替执行 Attention/MLP 与 All-to-All Dispatch/Combine 掩盖跨机 RDMA 延迟',
         weight: 20,
         keywords: ['tbo', 'two-batch', 'overlap', 'ping-pong', 'micro-batch', 'dispatch', 'combine', 'deepep', '掩盖', '隐藏'],
-        probe: '跨机开 EP64 后，每次 Decode 都要做跨机 All-to-All，延迟很高。DeepSeek 是如何通过 Two-Batch Overlap (TBO) 把通信耗时藏起来的？',
+        probe: '哪些子阶段可以跨两批执行？当每个微批的专家 GEMM 太小时会有何代价？',
       },
       {
         id: 'eplb',
-        label: '冗余专家负载均衡 (EPLB)：线上统计热门专家，在空闲显存中复制多份高热点专家，消除长尾专家卡脖子',
+        label: 'EPLB 复制、重排热点逻辑专家并在等价物理副本间分流，权衡显存及迁移',
         weight: 18,
         keywords: ['冗余', 'redundant', 'eplb', '热点', '负载均衡', '复制', 'straggler', '重排'],
         probe: '在线推理时用户请求话题集中（如大量代码题），某些专家会被疯狂路由成为热点拖垮整批 Decode，推理期又不能改模型权重，怎么解决？',
       },
       {
         id: 'pd-ep-scale',
-        label: 'PD 分离配不同 EP 规模：Prefill 算力密集用较小 EP (如 EP32)，Decode 追求极限并发与带宽用超大 EP (如 EP144/EP320)',
+        label: '解释公开部署的 P/D 分工和通信内核，允许其他满足 SLO 的 EP 规模',
         weight: 14,
         keywords: ['prefill', 'decode', 'pd分离', 'ep32', 'ep144', '320', '低延迟内核', 'low-latency'],
-        probe: '为什么 Prefill 集群用较小 EP (如 EP32)，而 Decode 集群要开到极宽的 EP144 甚至 EP320？通信内核有什么不同？',
+        probe: '公开案例分别取 EP32/144。给定新的到达率和 SLO，怎样选择 P/D 的 EP 度数与通信 kernel？',
       },
     ],
     hints: [
-      'L1 方向提示：核心矛盾是“MLA 怕 TP 复制 KV”+“256 专家单卡权重太重导致 Batch 上不去、单专家算术强度极低”。',
-      'L2 Wide-EP 魔力：EP 扩到 64~320 卡后，每张卡只需存 1~4 个专家，权重显存骤减，腾出几十 GB 显存装 KV Cache，且几十个 DP 组的 Token 汇聚到同一专家上，直接把 MoE Grouped GEMM 推向高算术强度！',
-      'L3 TBO 机制：把单卡的 Batch 对半拆成 Batch A 和 Batch B：当 A 在跑 Attention + MoE MLP 计算时，B 正在通过 DeepEP Low-Latency RDMA 内核做 Dispatch/Combine，形成完美双缓冲流水。',
+      'L1 分别核算每层共享的 MLA 潜向量、attention 权重和专家权重在每卡上的放置。',
+      'L2 均匀 Top-k 路由下，全 EP 组有 T 个 token、E 个逻辑专家时，每专家平均为 kT/E。',
+      'L3 对准两个 micro-batch 的计算和 dispatch/combine 时间线，扣掉 GEMM 变小与未隐藏的通信。',
     ],
     followUps: [
       {
         stage: 'deepen',
-        question: '追问 1（Latency vs Throughput）：把 EP 开到 144 或 320 张卡，虽然集群总吞吐（tokens/s/GPU）极高，但单请求的端到端 TPOT 延迟受限于跨机 All-to-All 和 TBO 拆分。如果业务要求极低 TPOT (<15ms/token)，架构上应该怎么调整？',
+        question: '追问 1（延迟与吞吐）　当业务要求 TPOT <15 ms/token，怎样判断应缩小 EP 组、改变 micro-batch，还是增加较小实例的副本？',
       },
       {
         stage: 'corner',
         question: '追问 2（容错爆炸半径）：Wide-EP 意味着 32~144 张卡强耦合在同一个 All-to-All 通信域里，只要其中 1 张卡挂掉整个大实例就瘫痪了。生产运维中如何降低这种超大 EP 实例的故障爆炸半径？',
       },
     ],
-    referenceAnswer: `### Principal 级超大规模 MoE 推理架构
+    referenceAnswer: `### 先画出权重和 KV 的归属
 
-#### 1. 为什么放弃纯 TP 而采用 DP Attention + Wide-EP？
-- **DP Attention 解决 MLA KV 重复问题**：MLA 的核心状态是所有 Head 共享的 512 维 \`c_KV\`，无法像 MHA 那样按 Head 切分给 TP；若开 TP=8，每卡都会存一份完全相同的 \`c_KV\`，浪费 8× 显存！改成 **DP Attention** 后，每张卡独立服务不同请求的 Attention，零重复 KV，单实例最大并发直接放大 8×。
-- **Wide-EP (如 P: EP32, D: EP144/EP320) 破局内存与计算密度**：
-  - 671B FP8 权重约 671GB，若单机 8 卡跑则权重就吃光显存；拉宽到 EP144/EP320 后，每张卡仅承载 1~2 个专家，腾出海量 HBM 给 KV Cache；
-  - 更关键的是，Decode 时 144 个 DP 组的活跃请求全部通过 Dispatch 汇聚到对应专家，让单个专家的 Grouped GEMM Batch Size 提升十几倍，彻底摆脱极低算术强度的 Memory-bound 泥潭。
+671B 的 FP8 权重主体就约 671 GB，还需 scale、非量化参数、KV 与运行空间。TP8 能否装下依 GPU SKU 而定。普通 head TP 在 MLA 下常复制共享潜向量和 RoPE key。按请求做 DP Attention 可让一个请求的 KV 归一个 attention rank，但各 rank 要容纳其 attention 权重，也要平衡请求长度。并发增益需按剩余显存计算。
 
-#### 2. 隐藏跨机 All-to-All：Two-Batch Overlap (TBO) + DeepEP
-- **Prefill**：拆成 2 个 Micro-batch，交替执行计算与普通 High-Throughput DeepEP All-to-All。
-- **Decode**：同样拆成 2 个 Micro-batch，由于每层有 5 个子阶段，利用 **DeepEP Low-Latency IBGDA (纯 RDMA 零 CPU 参与)** 内核在后台异步 Dispatch/Combine，前台 GPU SM 全速跑 FlashMLA 与 FP8 Grouped GEMM，实现通信延迟几乎全掩盖。
+**公开部署算例**。DeepSeek 2025 年披露的一个部署单元有 256 个逻辑路由专家，再放 32 个冗余专家。Prefill EP32，每 GPU 每个 MoE 层持有 288/32=9 个路由专家实例。decode EP144，每 GPU 持有 2 个。此例两侧 MLA/共享专家都按 DP 部署。EPLB 把同一个逻辑专家的负载分配给相同权重的物理副本，重排时要同步映射和权重。
 
-#### 3. 热点治理：冗余专家负载均衡 (EPLB)
-- 每隔几分钟在线统计各专家的真实命中热度，在每张卡预留 1 个冗余专家槽位（例如 256 个逻辑专家部署为 288~320 个物理专家实例），将最热门的专家多部署几份副本，并在路由时均匀分摊请求，压平长尾 Straggler。`,
+- **批量与 EP**。全局 T 个 token、Top-8、均匀路由时，每逻辑专家平均 8T/256 个分配。固定 T 而增大 EP 会改变每卡权重与通信，平均每专家 token 数不变。若更大服务域可聚合更多请求，才可能使 Grouped GEMM 更饱满。热点副本可减少最慢 rank 的负担。
+- **TBO**。将就绪请求拆成两批，用一批的计算覆盖另一批的 dispatch/combine。Prefill 偏重批量带宽，decode 对小消息延迟更敏感。要比较拆分后 GEMM 效率、在关键路径上暴露的通信与 P99 TPOT。
+- **低延迟与故障**。相同流量回放比较较小 EP、多个实例、低延迟通信核及是否开 TBO。缩小故障域的代价可能是额外权重副本。跨机集体通信失败时可把新流量移往独立健康实例，重建组并处理已接收请求。冗余专家本身不能让失效的 collective 自动继续。
+
+> 依据　DeepSeek《DeepSeek-V3/R1 Inference System Overview》，2025 年 2 月公开的部署配置。`,
   },
   {
     id: 'inf-08',
@@ -579,7 +538,7 @@ export const INFERENCE_QUESTIONS = [
     frequency: '高频必考',
     incident: true,
     tags: ['SLO排障', 'TTFT', 'TPOT', 'Preemption', 'Prefix Routing'],
-    summary: '真实线上告警复盘：大促高峰期 TTFT P99 飙到 8 秒、TPOT 周期性卡顿 500ms，如何逐层定位并根治？',
+    summary: '根据给定高峰告警，用请求级时间线区分排队、长 prefill、KV 抢占和主机暂停。',
     contextSpecs: ['TTFT SLA < 1s', 'TPOT SLA < 40ms', 'vLLM / SGLang 集群', '监控与路由'],
     prompt: '【线上故障排障】你负责的 72B 在线推理集群（64 台 8×H100，跑 vLLM/SGLang）在业务高峰期突然告警：平均 GPU 利用率看起来只有 65%，但 TTFT P99 从 600ms 暴涨到 8 秒，TPOT P99 周期性出现 400~800ms 的毛刺，且整体输出吞吐反而在下降。请给出你的系统性排查路径、可能根因清单以及立即可落地的止血与根治方案。',
     rubric: [
@@ -592,14 +551,14 @@ export const INFERENCE_QUESTIONS = [
       },
       {
         id: 'preemption-thrash',
-        label: '识别 KV 抢占雪崩 (Preemption Thrashing)：KV 使用率打满 99%+ 反复驱逐重算，导致吞吐不升反降、TTFT/TPOT 双崩',
+        label: '由抢占率、重算工作量和有效吞吐共同诊断 thrashing，区分可回收缓存',
         weight: 22,
-        keywords: ['雪崩', 'thrashing', '抢占', 'recompute', '重算', '99%', '打满', '吞吐下降', 'max_num_seqs'],
+        keywords: ['thrashing', '抢占', 'recompute', '重算', '驱逐', '有效吞吐', 'max_num_seqs'],
         probe: '为什么流量越高、整体输出吞吐反而“不升反降”？这种反常的吞吐倒挂在 KV Cache 满载时是怎么形成的？',
       },
       {
         id: 'routing-imbalance',
-        label: '网关路由失衡：普通 Round-Robin 导致 Prefix Cache 命中率骤降 + 长请求集中打爆单实例',
+        label: '检查实例间负载倾斜，比较路由亲和性、预期等待与缓存命中的收益',
         weight: 20,
         keywords: ['路由', 'round-robin', 'prefix-aware', '负载均衡', '亲和', '长尾', 'kv-aware', '倾斜', '一致性哈希'],
         probe: '64 个实例整体 GPU 利用率只有 65%，却有实例在疯狂排队和抢占，网关层的负载均衡策略可能犯了什么典型错误？',
@@ -613,16 +572,16 @@ export const INFERENCE_QUESTIONS = [
       },
       {
         id: 'mitigation',
-        label: '止血与根治：限流/准入控制 (Token-based Admission)、切 Prefix+Load 感知路由、开 FP8 KV Cache 扩并发、异步 Tokenizer / PD 分离',
+        label: '根据证据选择可回退的准入/路由或预算调整，用 SLO goodput、拒绝率及质量复核',
         weight: 16,
-        keywords: ['限流', '准入', 'admission', 'fp8 kv', 'pd分离', '多进程', 'async', '止血'],
-        probe: '线上正在告警，哪两个改动可以在 5 分钟内立刻止血？中长期架构怎么根治？',
+        keywords: ['限流', '准入', 'admission', '拒绝率', '预算', '路由', '灰度', 'slo', '止血'],
+        probe: '根据当前证据，哪些可回退的限流或摘流措施能保护在途请求？分别用什么指标判定有效？',
       },
     ],
     hints: [
-      'L1 方向提示：遇到“平均利用率不高但 P99 崩了+吞吐倒挂”，90% 是两大元凶叠加：(1) 网关路由不感知 KV 负载与前缀导致单点过载；(2) 单点过载触发 KV Cache Preemption 雪崩！',
-      'L2 周期性卡顿检查清单：大 Prompt Prefill 阻塞、vLLM 抢占重算暂停 Decode、Python 同步 GC / Tokenizer 占满主进程 Event Loop。',
-      'L3 速效止血：调低 \`max_num_seqs\` / 开启 Token-level 准入控制防止 KV 超过 90% 触发雪崩 + 网关切为 **Least-KV-Load + Prefix-Aware** 路由。',
+      'L1 按实例、请求长度和时段拆分，先确认 P99 是每个请求平均 TPOT 还是每次 token 间隔。',
+      'L2 对齐长 prompt、抢占重算、主机暂停与 GPU 时间线，区分同时出现和真正的先后依赖。',
+      'L3 比较 token 预算、可回收块、排队长度和流量偏斜，用限制新增负载的实验验证抢占假设。',
     ],
     followUps: [
       {
@@ -634,23 +593,21 @@ export const INFERENCE_QUESTIONS = [
         question: '追问 2（Host 瓶颈排查）：怎么用工具实证确认 400ms 的周期性毛刺到底是 GPU 算子慢了，还是 Python 主线程 Tokenizer/Detokenizer/Scheduler 卡住了？',
       },
     ],
-    referenceAnswer: `### Staff 级线上排障 Playbook
+    referenceAnswer: `### 用同一批慢请求画时间线
 
-#### 1. 黄金 4 指标速诊（区分根因）
-1. **Queueing Time vs Pure Prefill Time**：若 Queueing 占 7s，是过载/排队/路由倾斜；若 Pure Prefill 占 7s，是 Prefix Cache 失效或超长 Prompt 冲击。
-2. **\`gpu_cache_usage_perc\` & \`num_preemptions_total\`**：若部分实例 KV 使用率逼近 98%~100% 且抢占计数飙升，说明发生了 **KV 抢占雪崩 (Preemption Thrashing)**——新请求一进来就把老请求 KV 踢掉重算，GPU 算力全耗在反复重算上，导致**有效输出吞吐倒挂**！
-3. **\`prefix_cache_hit_rate\`**：若命中率突降，Prefill 算力开销瞬间放大 5~10×。
-4. **单实例队列深度分布（P99 vs Mean）**：解释“集群平均利用率 65% 但 P99 崩盘”的路由倾斜。
+TTFT 从到达到首 token，包括网关、分词、排队、prefill 及返回。逐 token 毛刺看 ITL。对一个输出 n>1 个 token 的请求，平均 TPOT=(末 token 时刻−首 token 时刻)/(n−1)。请求平均值的 P99 和各次 ITL 的 P99 可能差很多。按实例、prompt/输出长度和到达率分桶，避免用集群平均 GPU util 定根因。
 
-#### 2. TPOT 周期性 400~800ms 毛刺排查
-- **Prefill 阻塞**：未开 Chunked Prefill 或 \`max_num_batched_tokens\` 设太大（如 16384），长 Prompt 周期性卡死 Decode。
-- **Host / Python 运行时阻塞**：Tokenizer/Detokenizer 跑在主进程、Python Cyclic GC 触发 Stop-the-world、或 Batch Size 超出预设 CUDA Graph 捕获范围回退到 Eager Mode。
-- **定位工具**：抓 \`py-spy\` 看主循环火焰图 + \`nsys\` 看 GPU Stream 上是否出现几百毫秒的空白 Gap（有大空白 Gap 必是 Host CPU/通信阻塞，非 GPU 算慢）。
+| 观测 | 可以验证的假设 |
+|---|---|
+| 部分实例等待队列与排队时长上升，其余实例有余量 | 检查路由倾斜、长请求与热点前缀的驻留位置 |
+| KV 占用高，且抢占计数增量、重复 prefill 一起升，有效输出下降 | 检查容量压力造成的驱逐与重算。区分可回收 prefix 块和正在引用的块 |
+| 未命中 prefill token 增多，慢迭代与 ITL 峰值对齐 | 比较请求长度、前缀命中、chunk 和每轮 token budget |
+| GPU 时间线有空档或某个 kernel 变长 | 对齐 CPU 调度、分词、GC、同步、collective 和 graph/eager 路径，再判定等待来源 |
 
-#### 3. 止血与根治方案
-- **5 分钟止血**：(1) 启用 KV 水位保护（KV > 85% 拒绝新进队列 / 网关摘流防雪崩）；(2) 调优 \`max_num_batched_tokens\`（2048~4096）保护 Decode TPOT；(3) 对超长 Prompt 做分级路由隔离。
-- **中长期根治**：
-  - 网关升级为 **Bounded-Load Prefix-Aware Routing**（兼顾前缀命中与实例 KV/等待队列负载：当命中节点负载超过均值 1.2× 时强制溢出到最闲节点，解决爆款 Agent 热点）；
-  - 开启 **FP8 KV Cache** 翻倍并发容量，升级 vLLM V1 / SGLang 独立多进程异步 Frontend 消除 Python 阻塞，重度长文本业务上 **PD 分离**。`,
+以引擎实际 /metrics 为准。vLLM V1 的例子有 \`vllm:kv_cache_usage_perc\`、\`vllm:num_preemptions_total\`、\`vllm:inter_token_latency_seconds\`。计数器看窗口增量，命中率用同一窗口 hits/queries。
+
+**止血与复核**。过载实例可先减少新入队 token、将超长请求导向有容量的池，测量已接收请求和拒绝率。若证据指向 prefill 干扰，灰度调低预算，同时看 TTFT 代价。热门前缀可在多个实例保留，路由时比较节省的 prefill 时间和额外排队时间。只有在 KV 容量或长期 P/D 干扰确为限制时，再比较 KV 量化或分池，并在相同负载复测 SLO goodput。
+
+> 依据　vLLM《Production Metrics》及 v0.10.2《Optimization and Tuning》。`,
   },
 ];

@@ -38,6 +38,15 @@ test('Question bank has 28 balanced AI Infra questions with valid schema & 100% 
   assert.equal(byTrack.kernel, 5);
 });
 
+test('Built-in reference answers cover their own local rubric vocabulary', () => {
+  for (const q of ALL_QUESTIONS) {
+    const { rubricDetails } = analyzeBoardAnswer(q, q.referenceAnswer);
+    for (const item of rubricDetails) {
+      assert.notEqual(item.state, 'miss', `${q.id} reference missed ${item.id}`);
+    }
+  }
+});
+
 test('extractCandidateText removes inserted prompt block cleanly', () => {
   const q = ALL_QUESTIONS[0];
   const board = `=== [题目] ${q.title} (${q.level}) ===\n${q.prompt}\n参考参数：1024×H100 80G | 8×GPU NVLink 900GB/s\n====================================\n[候选人作答区]\nTP=8 限制在机内 NVLink，PP 跨机传激活。`;
@@ -53,10 +62,10 @@ test('analyzeBoardAnswer scores strong quantitative AI Infra answer higher than 
   const weak = analyzeBoardAnswer(q, '分布式训练主要就是把模型切分到多张卡上并行跑。', 'P7');
   const strong = analyzeBoardAnswer(
     q,
-    `第一性原则：显存放得下时应尽量克制 TP 和 PP/VPP，优先用 FSDP2/HSDP 零气泡，避免 TP 卡在关键路径把 GEMM 切窄。
-    在 1024×H100 (80GB) 上 70B 静态显存 16Ψ=1120GB，HSDP 64 路分片单卡仅 17.5GB；但 GBS=4M、seq=8K 只有 512 条序列 ⇒ DP≤512，所以最小只需 TP=2 × PP=1 × DP=512 (HSDP)，开 SP 机内 NVLink (AllGather+ReduceScatter)，每层前向通信 8BSH 字节。
-    PP 与 Interleaved VPP 只有显存或通信域受限时才上，且要注意层数整除 (p*v|80) 和 Bubble 气泡率 (p-1)/(v*m+p-1)。
-    扩到 128K 长上下文时，单步仅剩 32 条序列且激活显存暴涨，需要切出 CP=16（机内 Ulysses + 跨机 Ring Attention）分摊激活显存。`,
+    `先比较 FSDP2/HSDP 的参数 AllGather 与 TP 通信。TP 可能把 GEMM 切窄，PP 会引入气泡。
+    GBS=4,194,304 tokens、seq=8192 时有 512 条序列。取 TP=2 × PP=1 × DP=512，DP 内 HSDP 64 路分片时，每卡静态显存约 1120/(2×64)=8.75 GB，还要预留激活和临时区。机内 NVLink 上开 TP+SP，每层前向两次 AllGather 和两次 ReduceScatter，每卡发送 8(T−1)/T × BSH 字节。
+    等时 stage 的 1F1B 理想气泡率为 (p−1)/(m+p−1)，均匀 Interleaved VPP 还要核对层数整除及新增 P2P。
+    128K 时只有 32 条序列，可取 TP=2、CP=16、DP=32。每个 TP rank 有 4 个 KV head，机内 Ulysses=4，再跨机 Ring Attention=4。`,
     'P7'
   );
 
@@ -113,13 +122,13 @@ test('generateLocalFeedbackReport generates valid structured Markdown report', (
 
 test('evaluateCandidateMockTurn progresses through 3 rounds and finishes cleanly', () => {
   const q = ALL_QUESTIONS.find((x) => x.id === 'rl-01');
-  const turns = [{ role: 'candidate', content: 'PPO 有 Actor Critic Ref RM 四个模型，显存 36Ψ。' }];
+  const turns = [{ role: 'candidate', content: '经典 RLHF-PPO 若有独立等大 Actor、Critic、Ref 和 RM，示例静态状态总量是 36Ψ 字节。' }];
   const r1 = evaluateCandidateMockTurn(q, turns, 'strict', 'P7');
   assert.equal(r1.done, false);
   assert.ok(r1.reply.length > 20);
 
   turns.push({ role: 'interviewer', content: r1.reply });
-  turns.push({ role: 'candidate', content: 'GRPO 去掉 Critic 靠 Group G 采样算相对 Advantage，瓶颈转到长 CoT Rollout 占 80% 时间。' });
+  turns.push({ role: 'candidate', content: 'GRPO 去掉 Critic，用同 prompt 的 Group 采样算相对 Advantage。长 CoT 的自回归 Rollout 可能成为瓶颈，可分阶段计时。' });
   const r2 = evaluateCandidateMockTurn(q, turns, 'strict', 'P7');
   assert.equal(r2.done, false);
 
