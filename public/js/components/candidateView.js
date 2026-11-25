@@ -1,6 +1,8 @@
 import { TRACKS, INTERVIEW_MODES, TARGET_LEVELS, PERSONAS, FORMULA_SNIPPETS } from '../data/index.js';
+import { getVideosForQuestion } from '../data/videos.js';
 import { aiCandidateNextTurn } from '../engine/llmClient.js';
 import { escapeHtml, renderMarkdown } from '../engine/markdown.js';
+import { renderVideoStrip } from './videoStrip.js';
 
 let activeRecognition = null;
 
@@ -488,6 +490,7 @@ function renderCandidateQuestionSummary(q, analysis, hasNext) {
         <summary style="cursor:pointer;font-weight:700;font-size:13px;margin-bottom:8px;color:var(--track-inference);">展开 Staff 级参考架构解析</summary>
         <div class="msg-content">${renderMarkdown(q.referenceAnswer || '')}</div>
       </details>
+      ${renderVideoStrip(getVideosForQuestion(q.id))}
     </div>
   `;
 }

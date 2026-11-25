@@ -5,6 +5,7 @@ import {
   generateLocalFeedbackReport,
   evaluateCandidateMockTurn,
 } from './evaluator.js';
+import { explainSelectionLocal } from './explainer.js';
 import { PERSONAS, TRACKS } from '../data/index.js';
 
 async function callProxy(llmConfig, messages, maxTokens = 1400) {
@@ -283,6 +284,73 @@ ${
       reply: reply.trim() || local.reply,
       source: `llm:${llmConfig.model}`,
     };
+  } catch (err) {
+    return {
+      ...local,
+      source: 'local-fallback',
+      fallbackReason: err.message,
+    };
+  }
+}
+
+/**
+ * Page-wide Selection-to-Explain AI Assistant (Live LLM with offline glossary fallback)
+ */
+export async function aiExplainSelection(llmConfig, payload) {
+  const {
+    selectedText = '',
+    surroundingContext = '',
+    question = null,
+    mode = 'explain',
+    history = [],
+    userFollowUp = '',
+  } = payload || {};
+
+  const local = explainSelectionLocal({ selectedText, surroundingContext, question, mode, userFollowUp });
+  if (!llmConfig?.enabled || !llmConfig?.baseUrl || !llmConfig?.model) {
+    return local;
+  }
+
+  const modeInstructions = {
+    explain: '把选中片段拆开讲透：它在当前高密度参考答案里具体指什么、底层机制是什么、隐含了什么前提/边界条件。',
+    derivation: '给出选中公式、字节数或复杂度结论的逐步推导过程，明确变量含义、单位（元素 vs 字节、GiB vs GB）与省略项。',
+    example: '结合 H100 SXM 80GB / 70B Dense / DeepSeek-V3 等常见规格，给出一个可以直接手算复现的具体数字算例。',
+    probe: '站在资深 AI Infra 面试官视角，围绕选中片段给出 2~3 句口头追问话术，并注明“答对的关键判据”和“常见误区”。',
+  };
+
+  const systemPrompt = `你是顶级 AI Lab / 大厂的 Principal AI Infra 技术顾问，正在辅助面试官或工程师精读高信息密度的 AI Infra 面试参考答案。
+要求：
+1. 严格精确、不编造数据、不夸大结论，凡涉及公式或硬件指标必注明前提与单位口径；
+2. 回答精炼清晰（200~420字为宜），使用清晰 Markdown 列表或分段，方便阅读；
+3. 紧扣用户选中的片段及其所在题目上下文作答。`;
+
+  const baseContextMsg = `【所属题目】${question ? `[${TRACKS[question.track]?.name || question.track} · ${question.level}] ${question.title}` : '全局页面内容'}
+【所在段落语境】${(surroundingContext || '').slice(0, 700)}
+【用户划词选中的片段】
+「${selectedText}」
+
+【本次需求】${userFollowUp ? userFollowUp : modeInstructions[mode] || modeInstructions.explain}`;
+
+  const messages = [{ role: 'system', content: systemPrompt }];
+  if (Array.isArray(history) && history.length > 0 && userFollowUp) {
+    messages.push({ role: 'user', content: `【所属题目】${question?.title || 'AI Infra'}\n【语境】${(surroundingContext || '').slice(0, 600)}\n【划词片段】「${selectedText}」` });
+    for (const turn of history.slice(-6)) {
+      messages.push({ role: turn.role === 'user' ? 'user' : 'assistant', content: turn.content });
+    }
+    messages.push({ role: 'user', content: userFollowUp });
+  } else {
+    messages.push({ role: 'user', content: baseContextMsg });
+  }
+
+  try {
+    const content = await callProxy(llmConfig, messages, 1100);
+    if (content && content.trim().length > 15) {
+      return {
+        source: `llm:${llmConfig.model}`,
+        content: content.trim(),
+      };
+    }
+    return local;
   } catch (err) {
     return {
       ...local,

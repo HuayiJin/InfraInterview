@@ -1,5 +1,7 @@
 import { TRACKS } from '../data/index.js';
+import { getVideosForQuestion } from '../data/videos.js';
 import { escapeHtml, renderMarkdown } from '../engine/markdown.js';
+import { renderVideoStrip } from './videoStrip.js';
 
 export function renderBankView(container, ctx) {
   const {
@@ -25,6 +27,7 @@ export function renderBankView(container, ctx) {
     if (filter.level !== 'all' && q.level !== filter.level) return false;
     if (filter.special === 'incident' && !q.incident) return false;
     if (filter.special === 'must' && q.frequency !== '高频必考') return false;
+    if (filter.special === 'profiling' && !(q.tags || []).some((t) => /profil|nsys|ncu|nsight|slo/i.test(t))) return false;
     if (filter.special === 'custom' && !q.custom) return false;
     if (qTerm) {
       const hay = `${q.title} ${q.summary} ${(q.tags || []).join(' ')} ${q.prompt}`.toLowerCase();
@@ -68,6 +71,7 @@ export function renderBankView(container, ctx) {
         <div class="chip-row">
           <button class="chip ${filter.special === 'all' ? 'selected' : ''}" data-bf-spec="all">全部类型</button>
           <button class="chip ${filter.special === 'must' ? 'selected' : ''}" data-bf-spec="must">高频必考</button>
+          <button class="chip ${filter.special === 'profiling' ? 'selected' : ''}" data-bf-spec="profiling">训推 Profiling</button>
           <button class="chip ${filter.special === 'incident' ? 'selected' : ''}" data-bf-spec="incident">线上排障</button>
           <button class="chip ${filter.special === 'custom' ? 'selected' : ''}" data-bf-spec="custom">我的自定义题</button>
         </div>
@@ -81,6 +85,7 @@ export function renderBankView(container, ctx) {
               .map((q) => {
                 const tr = TRACKS[q.track] || TRACKS.training;
                 const inQueue = session.questionIds.includes(q.id);
+                const hasVideo = getVideosForQuestion(q.id).length > 0;
                 return `
                   <article class="q-card">
                     <div style="display:flex;align-items:center;justify-content:space-between;gap:6px;flex-wrap:wrap;">
@@ -88,6 +93,7 @@ export function renderBankView(container, ctx) {
                         <span class="badge ${tr.badgeClass}">${tr.name}</span>
                         <span class="badge badge-mono">${q.level}</span>
                         ${q.incident ? '<span class="badge badge-danger">线上排障</span>' : ''}
+                        ${hasVideo ? '<span class="badge badge-video" title="含精选 YouTube 垂类图解视频">▶ 图解</span>' : ''}
                         ${q.custom ? '<span class="badge">自定义</span>' : ''}
                       </div>
                       <span style="font-size:11px;color:var(--text-muted);">${escapeHtml(q.frequency || '')}</span>
@@ -223,9 +229,10 @@ export function renderBankView(container, ctx) {
           </div>
         </div>
         <div class="ref-box">
-          <div class="ref-box-title"><span>Staff 级参考答案</span></div>
+          <div class="ref-box-title"><span>Staff 级参考答案</span><span class="badge badge-training">✨ 划词问 AI</span></div>
           <div class="msg-content">${renderMarkdown(q.referenceAnswer || '')}</div>
         </div>
+        ${renderVideoStrip(getVideosForQuestion(q.id))}
       `);
       document.querySelector('#modal-close-x')?.addEventListener('click', closeModal);
     })

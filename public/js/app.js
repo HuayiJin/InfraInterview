@@ -19,6 +19,7 @@ import { renderCandidateView, startCandidateMockWithQuestions } from './componen
 import { renderBankView } from './components/bankView.js';
 import { renderDossierView } from './components/dossierView.js';
 import { openSettingsModal } from './components/settingsModal.js';
+import { initSelectionExplainer } from './components/selectionExplainer.js';
 import { escapeHtml } from './engine/markdown.js';
 
 const state = {
@@ -246,8 +247,12 @@ function openQuickAssembleModal() {
           <div class="option-card-desc">2 道分布式训练/MoE + 2 道 FlashAttention/NCCL/硬件</div>
         </button>
         <button class="option-card" data-qa-preset="incident">
-          <div class="option-card-title">真实线上排障专场 (3 题)</div>
-          <div class="option-card-desc">万卡 Hang/SDC + 推理 SLO 雪崩 + RL 精度偏移</div>
+          <div class="option-card-title">真实线上排障专场 (4 题)</div>
+          <div class="option-card-desc">万卡 Hang / 显存 OOM / 推理 SLO 雪崩 / RL 精度偏移</div>
+        </button>
+        <button class="option-card" data-qa-preset="profiling">
+          <div class="option-card-title">训推 Profiling 专场 (4 题)</div>
+          <div class="option-card-desc">Step Time 拆解 + 显存 Snapshot + 推理端到端 + ncu/nccl 验收</div>
         </button>
       </div>
     </div>
@@ -275,7 +280,9 @@ function openQuickAssembleModal() {
       } else if (preset === 'train_kern') {
         ids = [...pickFrom('training', 2), ...pickFrom('kernel', 2)];
       } else if (preset === 'incident') {
-        ids = allQs.filter((q) => q.incident).map((q) => q.id);
+        ids = allQs.filter((q) => q.incident).slice(0, 4).map((q) => q.id);
+      } else if (preset === 'profiling') {
+        ids = ['tr-09', 'tr-10', 'inf-09', 'kn-06'].filter((id) => allQs.some((q) => q.id === id));
       }
 
       if (ids.length) {
@@ -455,6 +462,21 @@ function init() {
   window.addEventListener('keydown', (e) => {
     if (e.key === 'Escape') closeModal();
   });
+
+  // Global page-wide selection-to-explain AI assistant
+  initSelectionExplainer(() => ({
+    settings: state.settings,
+    copyText,
+    openSettings,
+    getActiveQuestion: () => {
+      const allQs = getAllQuestions();
+      if (state.role === 'candidate' && state.mockState.active) {
+        return state.mockState.questions[state.mockState.currentIndex] || null;
+      }
+      const qId = state.session.questionIds?.[state.session.activeIndex];
+      return allQs.find((q) => q.id === qId) || null;
+    },
+  }));
 
   render();
 }

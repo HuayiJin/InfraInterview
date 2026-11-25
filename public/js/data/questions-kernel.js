@@ -391,4 +391,97 @@ T=32,768，V=131,072，FP32 的 [T,V] 为 2³⁴ 字节，即 **16 GiB**。BF16 
 
 > 依据　Liger Kernel（arXiv:2410.10989）、Cut Your Losses（2411.09009）及 Megatron Core 的 VocabParallelCrossEntropy 实现。`,
   },
+  {
+    id: 'kn-06',
+    track: 'kernel',
+    title: '算子与通信微观 Profiling：ncu Roofline/Stall 诊断与 nccl-tests 硬件验收',
+    level: 'P7',
+    frequency: '高频',
+    incident: false,
+    tags: ['Profiling', 'ncu', 'Warp Stall', 'Sector Efficiency', 'nccl-tests', '硬件计数器'],
+    summary: '深入 Nsight Compute 指标体系（SOL、Warp Stall、Sector/Wavefront）以及 nccl-tests 对照 NIC/NVLink 硬件计数器的集群验收方法。',
+    contextSpecs: ['Nsight Compute (ncu)', 'SOL / Warp Stall', '32B Sector / Wavefront', 'nccl-tests + IB Counters'],
+    prompt: '单算子调优和集群网络验收是 AI Infra 最底层的 Profiling 功底。请回答：(1) 用 Nsight Compute (`ncu`) 剖析一个跑不满的 GPU kernel 时，如何结合 Speed-of-Light (SOL)、Warp Stall Breakdown 以及 Global Sector / Shared Wavefront 指标精准定位瓶颈？(2) 在新交付的 64 节点 H100 集群上，如何用 `nccl-tests` 配合底层 NIC/NVLink 硬件计数器完成通信性能验收与异常链路定位？',
+    rubric: [
+      {
+        id: 'ncu-sol',
+        label: '用 `ncu` Speed-of-Light (Compute% vs Memory%) 做三类归因：Compute-bound (>60~70% 计算管线)、Memory-bound (>60~70% DRAM/L2)、以及两者都低的 Latency/Launch/Occupancy-bound',
+        weight: 22,
+        keywords: ['sol', 'speed of light', 'compute', 'memory', 'latency-bound', 'dram', 'l2', 'tensor', 'ncu'],
+        probe: '如果 `ncu` 报告一个 kernel 的 Compute SOL 只有 18%、Memory SOL 也只有 22%，这说明它既不卡算力也不卡 HBM 带宽，那瓶颈到底在哪里？',
+      },
+      {
+        id: 'warp-stall',
+        label: '准确解读核心 Warp Stall：`Long Scoreboard` (L1TEX/DRAM/local spill)、`Short Scoreboard` (SMEM/固定延迟)、`MIO Throttle` (SMEM/SFU 发射满)、`Wait`/`Barrier` (同步)、`Not Selected` (健康竞争)',
+        weight: 26,
+        keywords: ['long scoreboard', 'short scoreboard', 'mio throttle', 'barrier', 'not selected', 'stall', 'eligible', 'l1tex', 'spill'],
+        probe: '在 `ncu` 的 Warp State Statistics 里，`Stall Not Selected` 占比很高是坏事吗？`Long Scoreboard` 和 `MIO Throttle` 分别对应哪类优化手段？',
+      },
+      {
+        id: 'mem-efficiency',
+        label: '微观访存效率指标：Global Memory 按实际传输 32B Sector 与理想需求比看非合并浪费；Shared Memory 看 `Wavefronts` 与理想比诊断 Bank Conflict；检查 Register Spill (Local Memory 流量)',
+        weight: 20,
+        keywords: ['sector', '32b', 'wavefront', 'bank conflict', 'local memory', 'spill', 'coalesced', '合并', '事务'],
+        probe: '怎样在 `ncu` 里一眼看出你的 Triton/CUDA kernel 到底有没有发生 Register Spill、非合并访存或 Shared Memory Bank Conflict？具体看哪些指标？',
+      },
+      {
+        id: 'nccl-tests-sweep',
+        label: '`nccl-tests` 验收方法：扫消息大小（小消息几 KB 看延迟 α 与树/协议，大消息百 MB~GB 看峰值 `busbw`）、区分 AllReduce/AllGather/ReduceScatter/AlltoAll 各自换算系数、注意 `in-place` 与多轮抖动',
+        weight: 18,
+        keywords: ['nccl-tests', 'busbw', 'algbw', '消息大小', '小消息', '大消息', 'alltoall', '延迟', '带宽', '抖动'],
+        probe: '做集群验收时只跑一条 1 GB AllReduce 够吗？为什么一定要把小消息（如 8 KB~256 KB）和 AlltoAll 也一起扫一遍？',
+      },
+      {
+        id: 'hw-counters',
+        label: '结合底层硬件计数器闭环验证：IB/RoCE 端口计数器 (`port_xmit/rcv_data`, `symbol_error`, `link_downed`, `ecn`/`pfc`, 重传) 与 NVLink CRC/重放错误 + 二分隔离定位坏链路/坏节点',
+        weight: 14,
+        keywords: ['计数器', 'counter', 'ib', 'crc', '重传', 'pfc', 'ecn', '二分', 'bisection', '拓扑', '光模块'],
+        probe: '如果 64 节点全网 AllReduce 的 `busbw` 比标称低了 30%，怎么在 10 分钟内用测试和硬件计数器把拖后腿的那根线或那台机器揪出来？',
+      },
+    ],
+    hints: [
+      'L1 `ncu` 先看 SOL 象限（双低=Latency/低并行/小 Grid），再看 Eligible Warps 与 Top Warp Stall，最后落到 Memory Workload Analysis 的 Sector/Wavefront 与指令 Mix。',
+      'L2 `Stall Not Selected` 表示该 Warp 其实已就绪（Eligible），只是同一周期其他就绪 Warp 先被调度器挑中执行——说明延迟隐藏非常健康，反而是好信号！',
+      'L3 集群验收用二分法（Bisection）：把 64 节点分成两组 32 节点、再拆 16/8/单机机内 + Pairwise 两两对打，同时对照 IB 端口误码/降速/重传计数器。',
+    ],
+    followUps: [
+      {
+        stage: 'deepen',
+        question: '追问 1（`ncu` 测量失真与锁频）　为什么同一份 kernel 连续跑两次 `ncu` 测出来的耗时和 SOL 会差 10%？而且 `ncu` 报告里的“Kernel Duration”为什么有时和 `nsys` 看到的真实线上耗时不一致？',
+      },
+      {
+        stage: 'corner',
+        question: '追问 2（AlltoAll 的 `busbw` 口径）　`nccl-tests` 中 AllReduce 的 `busbw = algbw × 2(N−1)/N`，那 AlltoAll、AllGather 和 ReduceScatter 的换算系数分别是多少？为什么 MoE 集群验收必须单独测 AlltoAll？',
+      },
+    ],
+    referenceAnswer: `### 一、\`ncu\` 单算子微观诊断三步法
+
+1. **Speed-of-Light (SOL) 定象限**：
+   - **Compute / Tensor Pipe 高 (>65%)**：Compute-bound，优化聚焦 Tensor Core 形状对齐、WGMMA/低精度指令、减少非矩阵辅助指令与循环开销。
+   - **DRAM / L2 高 (>65%)**：Memory-bound，优化聚焦算子融合（省 HBM 往返）、向量化加载、提高 L2/SMEM 复用与压缩数据类型。
+   - **双低（Compute 和 Memory 均 <40%）**：典型 **Latency / Occupancy / 小 Grid Bound**——例如 CTA 总数少于 SM 数（Wave Quantization）、寄存器/SMEM 爆表导致每 SM 仅驻留 1~2 个 Warp 无法隐藏延迟、或大量同步屏障。
+2. **Warp Stall Breakdown 看卡在哪条管线**：
+   - \`Long Scoreboard\`：等 L1TEX 长延迟数据（Global Memory、Local Memory spill 或 Texture）→ 查合并访存、异步预取/多级软件流水、消除寄存器溢出；
+   - \`Short Scoreboard\`：等 Shared Memory 或固定延迟指令结果 → 增加指令级并行（ILP）或重排无关指令掩盖；
+   - \`MIO Throttle\`：Shared Memory / SFU / 特殊指令发射队列打满 → 减少高频 SMEM Bank 冲突、减少重复 \`exp\`/标量运算；
+   - \`Barrier\` / \`Wait\`：线程块内 \`__syncthreads()\` 负载不均；
+   - \`Not Selected\`：Warp 已就绪只是排队让位给同周期另一就绪 Warp，通常说明**隐藏延迟充裕（良性信号）**。
+3. **访存效率与溢出实证**：
+   - **Global 合并度**：看 \`L1/TEX Global Load/Store\` 的 **Actual Sectors vs Ideal Sectors**（32B/sector）；比值 > 1 说明跨步或未对齐造成带宽浪费；
+   - **Shared Bank Conflict**：看 **Shared Wavefronts vs Ideal Wavefronts**；理想无冲突为 1:1，若 32-way 冲突则高达 32:1；
+   - **Register Spill**：检查 \`Local Memory\` 读写字节数与 \`lmem\` 指令，若非零则需调小 Tile 或控制寄存器压力。
+   - *测量纪律*：\`ncu\` 默认会**锁基础频率（Clock Control = base）**且在多 pass replay 前后自动刷新 L2 Cache，因此其耗时绝对值与线上 boost 频率、热 L2 下的 \`nsys\` 耗时不同，分析时应保持统一锁频/缓存策略对照前后版本。
+
+### 二、\`nccl-tests\` 与硬件计数器集群验收
+
+- **全维度扫测**：
+  - **算子覆盖**：AllReduce（\`busbw = algbw × 2(N−1)/N\`）、AllGather / ReduceScatter / AlltoAll（三者换算系数均为 **\`(N−1)/N\`**）。MoE/Ulysses 集群必须单独测 AlltoAll，因其同时打满全网多对多双向链路，最易暴露 ECMP 极化、跨 Spine 拥塞与 PFC 问题，而 Ring AllReduce 往往测不出来；
+  - **消息跨度**：从 8 KB 扫到 1~4 GB——小消息验延迟 $\\alpha$（协议切换 LL/LL128/Simple 与 Tree 算法），大消息验单向总线带宽 $B$（对照单机 NVLink 与跨机 NIC 理论线速）及多轮方差抖动。
+- **异常链路 10 分钟二分定位**：
+  1. 先单机跑机内 8 卡 AllReduce 排除单机 NVLink/PCIe 故障；
+  2. 对 64 节点做 **Bisection（32 vs 32 → 16 → 8 → Pairwise 两两对打）** 快速锁定拖慢的子集与节点；
+  3. 同步采集全网 **IB/RoCE 端口计数器**（实际链路协商速率是否从 NDR 400G 降级、\`symbol_error\` / \`port_rcv_errors\` / 重传 / ECN / PFC pause duration）与 \`nvidia-smi nvlink -e\`（NVLink CRC/replay 计数），结合物理拓扑表直接定位坏光模块、坏线缆或交换机端口。
+
+> 依据　NVIDIA Nsight Compute《Kernel Profiling Guide》、nccl-tests《Performance》及 InfiniBand/RoCE 运维诊断实践。`,
+  },
 ];

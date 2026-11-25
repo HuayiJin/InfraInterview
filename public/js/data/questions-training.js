@@ -620,4 +620,175 @@ p 为物理 stage 数，m 为每个副本每步的 micro-batch 数。气泡率�
 
 > 依据　PaLM（arXiv:2204.02311）关于 MFU 的定义及 NVIDIA H100 SXM 产品规格。`,
   },
+  {
+    id: 'tr-09',
+    track: 'training',
+    title: '分布式训练 Profiling 实战：Step Time 拆解、关键路径归因与 Straggler 定位',
+    level: 'P7',
+    frequency: '高频必考',
+    incident: true,
+    tags: ['Profiling', 'PyTorch Profiler', 'nsys', 'HTA', '通信重叠', 'Straggler'],
+    summary: '基于 nsys / Kineto / HTA 对多卡训练做时间线拆解，避免跨流重复计数，区分真链路慢与等慢节点。',
+    contextSpecs: ['512×H100 训练 MFU 偏低', 'nsys / PyTorch Kineto', 'HTA 时间拆解', 'Critical Path'],
+    prompt: '512 张 H100 上跑 Megatron/FSDP2 训练，稳态 MFU 只有 32%。你手上有 PyTorch Profiler (Kineto) 和 Nsight Systems trace。请说明怎样正确拆解单步耗时（计算、暴露通信、空闲/Host 等待）、为什么不能把多个 CUDA Stream 上的核耗时直接相加，以及如何从 trace 上区分“网络链路真慢”与“某个 rank 算慢导致全员在 AllReduce 里干等（Wait-for-Straggler）”？',
+    rubric: [
+      {
+        id: 'step-breakdown',
+        label: '按 GPU 时间轴并集 (Union/Critical Path) 拆解纯计算、重叠通信、暴露通信与设备空闲，不把并发流时长直接相加',
+        weight: 24,
+        keywords: ['并集', 'union', 'critical path', '关键路径', '暴露通信', 'exposed', 'overlap', '重叠', '并发流', 'stream', 'hta'],
+        probe: '计算流和 NCCL 通信流并发执行时，为什么把所有 kernel 的 duration 求和会超过单步墙钟时间？应该怎样定义“暴露通信时间”？',
+      },
+      {
+        id: 'straggler-vs-net',
+        label: '对齐各 rank 进入同一 Collective 的起始时间戳，区分单 rank 上游变慢（Wait-for-Straggler）与全员同时进入后的链路拥塞/降速',
+        weight: 26,
+        keywords: ['straggler', '慢节点', '进入时间', '对齐', 'wait', '等待', '上游', 'dataloader', 'gc', '链路', '拥塞', '同步'],
+        probe: 'Trace 里看到 511 张卡的 AllReduce kernel 都跑了 40ms，凭什么判断这 40ms 是网络带宽掉速，还是第 512 张卡晚进了 35ms？',
+      },
+      {
+        id: 'host-idle',
+        label: '定位 GPU 空闲 (Idle) 归因：CPU launch 队列断流、Host 侧数据加载/Python GC、以及隐式设备同步 (`cudaStreamSynchronize`/`.item()` 触发 D2H)',
+        weight: 20,
+        keywords: ['idle', '空闲', 'host', 'launch', 'cpu', 'synchronize', '.item()', 'd2h', 'dataloader', 'gc', '断流'],
+        probe: 'GPU 时间线上出现周期性空白 Gap 时，怎样在 nsys 里顺着 CUDA API 和 Host 线程找出是谁卡住了发射队列？',
+      },
+      {
+        id: 'profiler-overhead',
+        label: '控制采集开销与失真：跳过 warmup 仅采 1~2 个稳态 step，关闭/慎用 `with_stack` 与 `profile_memory` 避免放大 CPU overhead 制造假瓶颈',
+        weight: 16,
+        keywords: ['warmup', '开销', 'overhead', '失真', 'with_stack', 'record_shapes', '采样窗口', '稳态', 'cupti', 'nvtx'],
+        probe: '为什么开着全量 `with_stack=True` 抓 10 个 step 的 Kineto trace，经常抓出一堆实际上线上根本不存在的 CPU Gap？怎么规范采集窗口？',
+      },
+      {
+        id: 'actionable-verify',
+        label: '基于关键路径做闭环验证：对比单机同配置基线、按 HTA/trace 量化改动前后的暴露通信和有效步时',
+        weight: 14,
+        keywords: ['基线', '单机', '闭环', '步时', 'step time', 'nvtx', '验证', '对比', '迭代'],
+        probe: '改完 bucket 大小或 overlap 参数后，仅看“某几个通信核变快”够吗？最终应该拿哪几个 trace 指标验收？',
+      },
+    ],
+    hints: [
+      'L1 跨 stream 并发时，用区间并集把单步拆为：仅计算、计算与通信重叠、仅通信（暴露通信）、完全空闲四类互斥时段。',
+      'L2 抓多卡同一 collective 的开始与结束时刻：先到者在 kernel 里空转等最后到达者，只有对齐最晚进入时刻后的耗时才反映真实传输时间。',
+      'L3 采集时遵循 `wait -> warmup -> active(1~2 steps)`，并通过 NVTX 标记前向、反向、优化器与数据加载阶段。',
+    ],
+    followUps: [
+      {
+        stage: 'deepen',
+        question: '追问 1（通信核抢占算力）　在 trace 上看到 AllReduce 和 GEMM 实现了 100% 时间重叠（暴露通信为 0），为什么单步总时间还是比单卡无通信慢了 12%？怎样验证通信核对计算核的干扰？',
+      },
+      {
+        stage: 'corner',
+        question: '追问 2（规模化采集）　512 卡同时全量落盘 nsys/Kineto trace 文件极易打爆共享存储且难以人眼比对。在千卡规模下如何低成本抓到“恰好变慢的那 1 个 rank”？',
+      },
+    ],
+    referenceAnswer: `### 按时间轴并集拆解单步，不做跨流简单求和
+
+多 stream 并发时，直接累加所有 kernel 时长会重复计入重叠区间。按单个稳态 step 的 GPU 活跃时间轴取并集（如 Holistic Trace Analysis 的做法），划分为四段互斥时间：
+- **纯计算**：仅有计算核在执行；
+- **计算-通信重叠**：计算流与通信流同时活跃；
+- **暴露通信（Exposed Comm）**：仅有通信核在跑、计算流已停等；
+- **设备空闲（Idle）**：没有任何 GPU 核运行，需进一步区分是 **Host 发射不及**、**数据/同步等待**还是 **PP 气泡**。
+
+### 区分“真链路慢”与“等慢节点（Wait-for-Straggler）”
+
+NCCL 集合通信 kernel 在各 rank 各自到达时启动，但必须等最晚的 rank 进入后才能完成传输。因此 **511 张卡上显示 40 ms 的 AllReduce，有 35 ms 可能只是在空等第 512 张卡**。排查步骤：
+1. 对齐同一逻辑步、同一 ProcessGroup、同一序号 collective 在各 rank 的**入队/开始时刻**（结合主机时钟同步偏移、NCCL Flight Recorder 或 NVTX step 锚点）；
+2. 若存在明显晚到的 rank，回溯该 rank 上游的前一算子、DataLoader、Python GC、CPU 抢占、GPU 降频或检查点 D2H；
+3. 若所有 rank 几乎同时进入却整体拉长，再查跨机流量、ECMP 极化、重传、PFC 暂停或错误选型（如小消息走了低效拓扑）。
+
+### 采集失真、隐性干扰与大规模定位
+
+- **控制探针扰动**：使用 \`schedule(wait, warmup, active=1~2)\`；\`with_stack\`、\`record_shapes\` 和高频内存追踪都会抬高 CPU 发射延迟，可能把原本 GPU-bound 的负载测出虚假 CPU Gap。先抓轻量 \`nsys\` + NVTX 确认宏观步时未明显漂移，再开细节。
+- **100% 重叠仍变慢的追问**：NCCL kernel 会占用若干 SM（由 channel/CTA 数决定）并争用 HBM/NVLink 带宽，拉长并发 GEMM 的实际时长。可在单机对照“关闭通信 vs 开启并行通信”的**同形状 GEMM 耗时**（或调优 \`NCCL_MAX_NCHANNELS\` / 改用 NVLS/SHARP 减 SM 占用）来量化 SM 争抢代价。
+- **大规模定位**：常态只采集轻量逐 rank 阶段计时（step/fwd/bwd/opt/data）和 Flight Recorder 环形缓冲；检测到某 rank 连续偏慢后，仅对该慢节点及其同通信域的 1~2 个对照健康节点按需触发短窗口 trace。
+
+> 依据　Meta Holistic Trace Analysis（HTA）时间分解方法、PyTorch Profiler 文档与 NVIDIA Nsight Systems 指南。`,
+  },
+  {
+    id: 'tr-10',
+    track: 'training',
+    title: '训练显存 Profiling 与 OOM 排查：Memory Snapshot、Allocated vs Reserved 与碎片定位',
+    level: 'P7',
+    frequency: '高频',
+    incident: true,
+    tags: ['Profiling', 'Memory Snapshot', 'OOM', '显存碎片', 'Expandable Segments'],
+    summary: '用 PyTorch Memory Snapshot 拆解训练期动态显存峰值，区分真实容量不足、分配器碎片、外部显存占用与张量泄漏。',
+    contextSpecs: ['80 GB H100 训练 OOM', 'Memory Snapshot', 'Allocated vs Reserved', 'Caching Allocator'],
+    prompt: '在 80 GB H100 上跑 FSDP2/Megatron 长上下文训练，静态模型状态算下来只占 28 GB，但训练跑了几个 step 后突然 OOM，报错显示 `tried to allocate 2.00 GiB (GPU 0; 79.25 GiB total; 61.40 GiB allocated; 1.10 GiB free; 74.80 GiB reserved in total by PyTorch)`。请解释报错里各数字的含义，给出用 PyTorch Memory Snapshot 定位峰值与碎片的方法，并说明怎样排查跨步缓慢涨显存的内存泄漏。',
+    rubric: [
+      {
+        id: 'oom-numbers',
+        label: '准确解读 OOM 报错各字段：allocated (活跃张量)、reserved (PyTorch Caching Allocator 持有)、total−reserved (CUDA Context / NCCL / Workspace / 外部进程占用)',
+        weight: 24,
+        keywords: ['allocated', 'reserved', 'free', 'caching allocator', 'context', 'nccl', 'workspace', 'nvidia-smi', '13.4', '碎片'],
+        probe: '报错里 `allocated=61.4 GiB` 但 `reserved=74.8 GiB`，中间差出来的 13.4 GiB 去哪了？另外 `79.25 - 74.8 = 4.45 GiB` 又被谁占着？',
+      },
+      {
+        id: 'memory-snapshot',
+        label: '使用 `torch.cuda.memory._record_memory_history()` + `_dump_snapshot()` 查看 Active Memory Timeline 与按调用栈归因的峰值构成',
+        weight: 24,
+        keywords: ['snapshot', '_record_memory_history', 'timeline', '调用栈', 'stack', '峰值', 'peak', 'backward', 'allgather', '激活'],
+        probe: '拿到 OOM 时的 Memory Snapshot（pickle 文件）在可视化工具里打开后，你重点看哪两个视图来判断是哪个算子撑爆了峰值？',
+      },
+      {
+        id: 'frag-vs-cap',
+        label: '区分「真活跃峰值超容」与「变长/大小块交错引发的虚拟地址碎片」；说明 `expandable_segments:True` (VMM) 治碎片但不减活跃张量总量',
+        weight: 22,
+        keywords: ['碎片', 'fragmentation', 'expandable_segments', 'vmm', '变长', '动态shape', '活跃', '容量', 'max_split_size'],
+        probe: '开启 `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` 底层靠什么机制缓解碎片？什么情况下开了它依然会 OOM？',
+      },
+      {
+        id: 'transient-spikes',
+        label: '识别常见瞬时峰值来源：FSDP 参数全量展开与预取缓冲、大词表 FP32 Logits/CE、Optimizer 首次 step 懒初始化状态、以及跨 stream 异步张量延迟释放 (`record_stream`)',
+        weight: 18,
+        keywords: ['prefetch', '预取', 'logits', 'optimizer', '懒初始化', 'step 1', 'record_stream', '跨流', '临时'],
+        probe: '为什么很多训练任务 Step 0 跑过去了，偏偏在 Step 1 的 Backward 或 `optimizer.step()` 突然 OOM？',
+      },
+      {
+        id: 'leak-debug',
+        label: '跨步缓慢涨显存的泄漏排查：保留了带 Autograd Graph 的 Tensor（日志/列表未 `.detach()`/`.item()`）、Python 循环引用、或未释放的 Hook/缓存',
+        weight: 12,
+        keywords: ['泄漏', 'leak', 'detach', 'item', '计算图', 'autograd', '引用', 'gc', 'hook', 'diff'],
+        probe: '如果前 20 个 step 每步 `allocated` 稳定涨 200 MB 直到第 50 步 OOM，你怎么快速抓出是哪一行代码把张量挂着没释放？',
+      },
+    ],
+    hints: [
+      'L1 先算清三笔差值：`reserved - allocated = 13.4 GiB` 是分配器内已向驱动申请但未被活跃张量使用的空洞/缓存；`total - reserved - free` 主要是 CUDA Context、cuBLAS/cuDNN workspace 与 NCCL 通信缓冲。',
+      'L2 变长序列、动态路由 MoE 或预取缓冲交错申请/释放不同尺寸块时，Caching Allocator 容易出现“总空闲够但找不到连续 2 GiB 块”的碎片。',
+      'L3 泄漏排查对比两个稳态 step 结束后的 snapshot diff，直接看新增存活张量的 Python 分配调用栈。',
+    ],
+    followUps: [
+      {
+        stage: 'deepen',
+        question: '追问 1（跨流张量滞留）　在手动写异步通信/计算 overlap 时，对临时张量调用了 `tensor.record_stream(comm_stream)`。如果计算流跑得比通信流快很多，可能会触发怎样的显存暴涨？如何避免？',
+      },
+      {
+        stage: 'corner',
+        question: '追问 2（`nvidia-smi` 比 PyTorch 高一大截）　`torch.cuda.max_memory_reserved()` 显示只有 58 GiB，但 `nvidia-smi` 却显示 76 GiB 甚至驱动报 OOM，多出来的 ~18 GiB 可能是谁占用的？怎么排查？',
+      },
+    ],
+    referenceAnswer: `### 先拆解 OOM 报错里的四组数字
+
+以报错 \`total=79.25, allocated=61.40, reserved=74.80, free=1.10 GiB\` 为例：
+- **\`allocated = 61.40 GiB\`**：当前仍被 PyTorch Tensor 引用的活跃显存（静态状态 + 在途激活 + 预取/临时张量）。
+- **\`reserved − allocated = 13.40 GiB\`**：PyTorch CUDA Caching Allocator 已向驱动申请、目前空闲但未归还的空间。当申请 \`2.00 GiB\` 连续块失败时，通常说明这 \`13.40 GiB\` 被零散小块切成**不连续的碎片空洞**（且驱动侧仅剩 \`1.10 GiB\` 无法再扩新段）。
+- **\`total − reserved − free ≈ 3.35 GiB\`**：PyTorch 分配器之外的占用，包括 CUDA Driver Context、cuBLAS/cuDNN workspace、NCCL 通信缓冲池、自定义扩展的 \`cudaMalloc\` 或同卡其他进程。
+
+### 用 Memory Snapshot 定位峰值、碎片与泄漏
+
+1. **抓包**：在可复现步开启 \`torch.cuda.memory._record_memory_history(max_entries=100000)\`，在 OOM 异常钩子或 step 末调用 \`_dump_snapshot()\`，用 PyTorch Memory Visualizer 查看：
+   - **Active Memory Timeline**：区分“稳定台阶”（模型/优化器状态）与“尖峰”（某层激活、大词表 logits、FSDP unshard/prefetch 叠加）；点击尖峰处可直接看到分配该张量的完整 Python 调用栈；
+   - **Allocator State History**：直观看出 \`reserved\` 与 \`allocated\` 之间的碎片空洞分布。
+2. **区分碎片 vs 真超容**：
+   - 若 \`reserved − allocated\` 很大且输入长度/MoE token 数剧烈变化，开启 \`PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True\`（底层基于 CUDA VMM 将分散物理页映射为连续虚拟段）常可消除大部分碎片；但注意它在**活跃张量峰值本身超过可用容量**时无效，且与部分依赖静态地址的旧分配路径需兼容验证。
+   - **Step 1 才 OOM 的常见元凶**：AdamW 优化器的一二阶矩往往在**第一次 \`optimizer.step()\` 才懒分配**（额外暴涨 8Ψ 字节），或首次 backward 才同时出现完整梯度 + 激活峰值。
+3. **两项追问**：
+   - **\`record_stream\` 滞留**：Caching Allocator 在关联 stream 完成前不会复用该块，且异步事件回收存在滞后；若生产流远快于消费流，多步临时张量堆积会撑爆显存。应改用显式 \`Event.wait_stream\` 同步或有界双缓冲复用固定内存，限制在途数量。
+   - **\`nvidia-smi\` 远高于 \`reserved\`**：常见于多进程/同卡残留进程、超大 NCCL buffer（过多 process group / channel）、cuBLAS workspace、或第三方推理/C++ 算子绕过 PyTorch Allocator 直接调用 \`cudaMalloc\`。可用 \`nvidia-smi --query-compute-apps\`、逐一排查 ProcessGroup 数量与 Nsight Systems 的 CUDA Memory Allocation 事件归因。
+   - **跨步泄漏**：比较 Step $k$ 与 Step $k+1$ 结束后存活张量的调用栈 diff，高频祸首是把带 \`grad_fn\` 的 loss/metrics Tensor 直接 \`append\` 进 Python list 而未调用 \`.detach()\`/\`.item()\`。
+
+> 依据　PyTorch《Understanding CUDA Memory Usage》及 CUDA Caching Allocator 文档。`,
+  },
 ];

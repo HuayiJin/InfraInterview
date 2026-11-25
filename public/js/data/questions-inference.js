@@ -610,4 +610,92 @@ TTFT 从到达到首 token，包括网关、分词、排队、prefill 及返回�
 
 > 依据　vLLM《Production Metrics》及 v0.10.2《Optimization and Tuning》。`,
   },
+  {
+    id: 'inf-09',
+    track: 'inference',
+    title: 'LLM 推理端到端 Profiling：TTFT/ITL 拆解、GPU-Util 假象与 Host/Sync 瓶颈定位',
+    level: 'P7',
+    frequency: '高频必考',
+    incident: true,
+    tags: ['Profiling', 'TTFT/ITL', 'GPU-Util', 'DCGM', 'CUDA Graph', 'Host瓶颈'],
+    summary: '揭穿 nvidia-smi GPU-Util 虚高假象，用 DCGM、nsys 和 py-spy 对在线推理服务做全链路微秒级拆解。',
+    contextSpecs: ['vLLM / SGLang 线上服务', 'GPU-Util 95% 但吞吐低', 'DCGM SM/DRAM Active', 'Host Sync & TP Comm'],
+    prompt: '8×H100 上部署 vLLM/SGLang 推理服务，压测发现 TTFT 与 ITL 都远差于预期，但运维看 `nvidia-smi` 报告 `GPU-Util` 高达 95%，据此认为“卡已经吃满了”。请解释为什么 `GPU-Util 95%` 不能代表算力或带宽饱和，应改看哪些硬件指标？并给出从网关到 GPU kernel 的端到端推理 Profiling 拆解路径，说明如何定位 Host 调度阻塞、隐式 D2H 同步和 TP AllReduce 延迟。',
+    rubric: [
+      {
+        id: 'gpu-util-fallacy',
+        label: '拆穿 `nvidia-smi` GPU-Util 口径：仅表示采样窗口内至少有 1 个 kernel 在运行的时间占比，改用 DCGM `SM_ACTIVE`/`TENSOR_ACTIVE`/`DRAM_ACTIVE` 或 `ncu` SOL 衡量真实饱和度',
+        weight: 26,
+        keywords: ['gpu-util', 'nvidia-smi', '假象', 'dcgm', 'tensor_active', 'dram_active', 'sm_active', '饱和', 'sol', '占比'],
+        probe: '如果一个 decode kernel 只用了 132 个 SM 里的 10 个，且 HBM 带宽只跑了 30%，`nvidia-smi` 的 `GPU-Util` 会显示多少？应该改盯哪些真实指标？',
+      },
+      {
+        id: 'e2e-stages',
+        label: '端到端延迟分段埋点：网关/HTTP → Tokenizer → Engine Queue → Scheduler & Input Prep → H2D → Model Forward (Attn / GEMM / TP AllReduce) → Sampler & D2H → Detokenizer',
+        weight: 22,
+        keywords: ['tokenizer', 'scheduler', 'queue', 'h2d', 'd2h', 'sampler', 'allreduce', 'detokenizer', 'nvtx', '分段'],
+        probe: '把一个请求 25ms 的单步 ITL 拆开，除了 GPU Forward 本身，哪几个环节最容易悄悄吃掉 5~10ms？',
+      },
+      {
+        id: 'host-sync-trap',
+        label: '定位 Host 与同步陷阱：主循环同步等待 Sampler 输出 (`.item()` / `cudaStreamSynchronize`) 打断异步发射流水、Python 调度与 GC、以及未命中 CUDA Graph 回退 Eager',
+        weight: 22,
+        keywords: ['synchronize', 'd2h', '.item()', 'async', '异步调度', 'cuda graph', 'eager', 'py-spy', 'gc', 'gap'],
+        probe: '为什么推理引擎（如 vLLM V1 / SGLang）都强调“Async Scheduling / Zero-Overhead Scheduler”？同步等待上一个 step 的 sampled token 会导致 GPU 时间线出现什么形态？',
+      },
+      {
+        id: 'forward-breakdown',
+        label: 'GPU Forward 内部分解（区分 Prefill 与 Decode）：核对 GEMM、Attention (KV 读)、MoE/All-to-All、TP AllReduce 和自定义量化解包各自占比与是否启用 Custom AllReduce',
+        weight: 18,
+        keywords: ['prefill', 'decode', 'gemm', 'attention', 'custom allreduce', 'p2p', 'nccl', 'kv', 'roofline', '占比'],
+        probe: '在 8 卡 TP Decode（batch=16）的 `nsys` trace 里，为什么有时 TP AllReduce 竟然占到单步 GPU 时间的 25%~35%？怎么用 trace 验证是否走了低延迟 Custom AllReduce？',
+      },
+      {
+        id: 'repro-benchmark',
+        label: '科学的压测与 Profiling 纪律：固定模型/长度分布/前缀命中率与到达泊松流，对比纯引擎离线吞吐与含 HTTP/前端的端到端延迟',
+        weight: 12,
+        keywords: ['压测', '泊松', '长度分布', 'prefix', '命中率', '控制变量', '离线', '端到端', 'p99'],
+        probe: '做推理 Profiling 时，如果直接用固定 512 长度的重复 prompt 压测，测出来的指标会怎样误导线上判断？',
+      },
+    ],
+    hints: [
+      'L1 `GPU-Util` 是“时间维活跃度”而非“空间/硬件资源利用率”——单核占满时间线也能 99%，必须看 DCGM Profiling 指标（`GR_ENGINE_ACTIVE`、`PIPE_TENSOR_ACTIVE`、`DRAM_ACTIVE`）。',
+      'L2 用 `nsys` 对齐 CPU 线程和 GPU Stream：如果每步 Decode 尾部固定出现 1~3ms 的 GPU 空白 Gap，且 CPU 侧正卡在 `cudaStreamSynchronize` + Scheduler/Detokenizer，说明未做好异步重叠或发生了隐式 D2H 同步。',
+      'L3 小消息 TP AllReduce（几百 KB）是延迟受限（Latency-bound）：检查 trace 中是否启用了 NVLink P2P Custom AllReduce / NVLS，而不是回退到了高启动开销的通用路径。',
+    ],
+    followUps: [
+      {
+        stage: 'deepen',
+        question: '追问 1（Async Scheduling 的代价）　如果为了让 GPU 零空档，在 Step $t$ 的采样结果还没回传给 CPU 之前，CPU 就提前把 Step $t+1$ 的 kernel 发射进 GPU 队列（Async Scheduling），那遇到请求恰好在 Step $t$ 吐出 EOS 或触发 stop string 怎么办？',
+      },
+      {
+        stage: 'corner',
+        question: '追问 2（Prefill vs Decode 混部 Profiling）　开启 Chunked Prefill 后，同一张 `nsys` trace 里既有 Prefill token 又有 Decode token 混在同一个 GEMM 和 Attention 核里。如何分别定位到底是谁拉慢了 ITL？',
+      },
+    ],
+    referenceAnswer: `### 先拆穿 \`nvidia-smi\` GPU-Util 95% 的假象
+
+\`nvidia-smi\` 的 \`GPU-Util\` 仅表示最近采样周期内“至少有一个 CUDA kernel 在 GPU 上执行”的时间比例，**完全不反映 SM 占用、Tensor Core 利用率或 HBM 带宽饱和度**。哪怕一个只占 8 个 SM 的小算子或低效通信等待核持续占着时间轴，它照样报 95%~100%。
+- **正确硬件指标（DCGM / \`ncu\`）**：
+  - Prefill / 大 Batch 线性层看 **\`PIPE_TENSOR_ACTIVE\`**（Tensor Core 活跃度）与实测 TFLOP/s；
+  - Decode 阶段重点看 **\`DRAM_ACTIVE\`**（HBM 带宽利用率，健康 Decode 通常应靠近实测带宽上限的 60%~80%+）与 **\`SM_ACTIVE\`**；
+  - 核对实际有效输出 tokens/s 与单卡 Roofline 上界的差距。
+
+### 端到端推理延迟拆解与定位路径
+
+用统一 Request ID 串联四层工具（网关日志 + 引擎 NVTX/Prometheus + \`nsys\` + \`py-spy\`）：
+1. **引擎外与前端**：HTTP 反序列化 → Tokenizer → Waiting Queue。若离线直调引擎很快、走网关很慢，优先查多进程/异步 Frontend、Tokenizer CPU 争抢或网关路由倾斜。
+2. **Host 调度与 D2H 同步气泡（高频元凶）**：在 \`nsys\` GPU Stream 上，若每步 Decode 之间有规则空白 Gap（如 1~5 ms），顺着对应 CPU 线程常能看到：
+   - Sampler 结束后调用 \`.item()\`/\`.tolist()\` 触发隐式 \`cudaStreamSynchronize\`，把 GPU 队列彻底排空再由 Python 跑下一轮 Scheduler；
+   - Batch Size 或序列形态未命中预捕获的 **CUDA Graph** 回退到 Eager Mode，产生上百个微秒级小 kernel launch 锯齿；
+   - Python 主进程 GC 或 Detokenizer 阻塞事件循环（用 \`py-spy\` 火焰图立即可见）。
+3. **GPU Forward 内部分解**：在单步稳态 Decode 中汇总四类 kernel 耗时占比——**Linear GEMM（含反量化）**、**Paged/FlashAttention（读 KV）**、**TP AllReduce / MoE All-to-All**、**Norm/RoPE/Sampler 等零散算子**。小 Batch 8 卡 TP 中，单次 AllReduce 仅几百 KB、属延迟受限；检查 trace 是否命中机内 NVLink P2P Custom AllReduce/NVLS，避免误走高延迟路径或跨机通信。
+
+### 两项追问
+
+- **Async Scheduling 提前发射**：CPU 提前准备并下发 Step $t+1$ 的计算（通过 GPU 端缓冲直接读取 Step $t$ 产出的 token ID 作为下一轮输入，省去 Host 等待），将当前步调度/Detokenize 完全藏在 GPU 前向后面；若 Step $t$ 实际已命中 EOS/stop token，则丢弃 Step $t+1$ 多算出的 1 个冗余 token 并在下一轮释放槽位，用极小算力换掉整段 Host 同步空档。
+- **混部归因**：对每个 step 记录 \`num_prefill_tokens\`、\`num_decode_tokens\` 与 \`chunk_size\`，按是否有 prefill token 混入分组统计 ITL 分布；结合 NVTX 区分 prefill attention 与 decode attention 核时长，再扫不同 \`max_num_batched_tokens\` 画 TTFT–ITL 帕累托曲线。
+
+> 依据　NVIDIA DCGM Profiling Metrics 文档、vLLM V1 架构设计与 SGLang Zero-Overhead Scheduler 说明。`,
+  },
 ];

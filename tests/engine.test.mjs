@@ -11,9 +11,16 @@ import {
   evaluateCandidateMockTurn,
 } from '../public/js/engine/evaluator.js';
 import { renderMarkdown } from '../public/js/engine/markdown.js';
+import { explainSelectionLocal } from '../public/js/engine/explainer.js';
+import {
+  CURATED_VIDEOS,
+  getVideosForQuestion,
+  getVideosForSelection,
+  buildYoutubeSearchUrl,
+} from '../public/js/data/videos.js';
 
-test('Question bank has 28 balanced AI Infra questions with valid schema & 100% rubric weights', () => {
-  assert.equal(ALL_QUESTIONS.length, 28);
+test('Question bank has 32 balanced AI Infra questions with valid schema & 100% rubric weights', () => {
+  assert.equal(ALL_QUESTIONS.length, 32);
   const byTrack = { training: 0, inference: 0, rl: 0, kernel: 0 };
   const ids = new Set();
 
@@ -32,10 +39,10 @@ test('Question bank has 28 balanced AI Infra questions with valid schema & 100% 
     assert.ok(Array.isArray(q.followUps) && q.followUps.length >= 2, `Follow-ups missing on ${q.id}`);
   }
 
-  assert.equal(byTrack.training, 8);
-  assert.equal(byTrack.inference, 8);
+  assert.equal(byTrack.training, 10);
+  assert.equal(byTrack.inference, 9);
   assert.equal(byTrack.rl, 7);
-  assert.equal(byTrack.kernel, 5);
+  assert.equal(byTrack.kernel, 6);
 });
 
 test('Built-in reference answers cover their own local rubric vocabulary', () => {
@@ -145,4 +152,72 @@ test('renderMarkdown escapes raw HTML tags safely and formats tables', () => {
   assert.ok(html.includes('&lt;script&gt;'));
   assert.ok(html.includes('<table class="md-table">'));
   assert.ok(html.includes('<code>x</code>'));
+});
+
+test('explainSelectionLocal explains highlighted terms across modes and profiling topics', () => {
+  const q1 = ALL_QUESTIONS.find((x) => x.id === 'tr-01');
+  const exp1 = explainSelectionLocal({
+    selectedText: '8(T−1)/T × bSH',
+    surroundingContext: '典型 Megatron 稠密层的 Attention 和 MLP 各做一次 AG 和一次 RS',
+    question: q1,
+    mode: 'derivation',
+  });
+  assert.equal(exp1.source, 'local');
+  assert.ok(exp1.content.includes('AllGather') && exp1.content.includes('ReduceScatter'));
+
+  const qProf = ALL_QUESTIONS.find((x) => x.id === 'kn-06');
+  const expProf = explainSelectionLocal({
+    selectedText: 'Long Scoreboard',
+    surroundingContext: 'Warp Stall Breakdown',
+    question: qProf,
+    mode: 'explain',
+  });
+  assert.ok(expProf.content.includes('L1TEX'));
+
+  const expProbe = explainSelectionLocal({
+    selectedText: 'expm1(d)−d',
+    surroundingContext: 'k3 数值对照',
+    question: ALL_QUESTIONS.find((x) => x.id === 'rl-07'),
+    mode: 'probe',
+  });
+  assert.ok(expProbe.content.includes('追问'));
+});
+
+test('Curated YouTube videos use verified permanent watch URLs and match questions/selections accurately', () => {
+  const validQIds = new Set(ALL_QUESTIONS.map((q) => q.id));
+  const seenIds = new Set();
+  assert.ok(CURATED_VIDEOS.length >= 20, `Expected >=20 curated visual videos, got ${CURATED_VIDEOS.length}`);
+
+  for (const v of CURATED_VIDEOS) {
+    assert.match(v.id, /^[A-Za-z0-9_-]{11}$/, `Invalid YouTube id: ${v.id}`);
+    assert.ok(!seenIds.has(v.id), `Duplicate video id: ${v.id}`);
+    seenIds.add(v.id);
+    assert.equal(v.url, `https://www.youtube.com/watch?v=${v.id}`, `Non-canonical URL on ${v.id}`);
+    assert.ok(v.title && v.note && v.channel && v.styleTag, `Missing metadata on ${v.id}`);
+    assert.ok(Array.isArray(v.questionIds) && v.questionIds.length >= 1);
+    for (const qId of v.questionIds) {
+      assert.ok(validQIds.has(qId), `Video ${v.id} references unknown question ${qId}`);
+    }
+  }
+
+  // Question lookup: core visual topics have 1-2 videos, unmapped niche topics cleanly empty
+  const mlaVideos = getVideosForQuestion('inf-03');
+  assert.equal(mlaVideos.length, 2);
+  assert.ok(mlaVideos.some((v) => v.id === 'DBdeFbNrIZI'));
+  assert.equal(getVideosForQuestion('rl-07').length, 0);
+
+  // Selection lookup: direct term hit works across questions; unrelated niche terms stay empty
+  const flashMatch = getVideosForSelection('Online Softmax', 'FlashAttention tiling', 'kn-01');
+  assert.ok(flashMatch.length >= 1 && flashMatch.length <= 2);
+  assert.equal(flashMatch[0].id, 'us1nzaQKq0Y');
+
+  const ncuMatch = getVideosForSelection('Long Scoreboard', 'ncu warp stall', 'kn-06');
+  assert.ok(ncuMatch.some((v) => v.id === 'Iuy_RAvguBM'));
+
+  assert.equal(getVideosForSelection('完全无关的随机短语', '', 'rl-07').length, 0);
+
+  // YouTube search URL fallback
+  const ytUrl = buildYoutubeSearchUrl('CUDA VMM CuMem', ALL_QUESTIONS.find((q) => q.id === 'rl-05'));
+  assert.ok(ytUrl.startsWith('https://www.youtube.com/results?search_query='));
+  assert.ok(decodeURIComponent(ytUrl).includes('CUDA VMM CuMem'));
 });

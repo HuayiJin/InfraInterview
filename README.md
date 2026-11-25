@@ -14,12 +14,12 @@
 2. **候选人模拟自测（副视图）**
    - 顶部一键切换，严格隐藏参考答案与 Rubric，通过同款 Online Txt 白板接受 AI 面试官多轮追问拷打，单题结束后揭晓解析与复盘。
 
-3. **28 道全栈均衡 AI Infra 题库（P6 / P7 / P8 分层）**
-   - **分布式训练 (8 题)**：3D/5D 并行、ZeRO/FSDP2、MoE EP & DualPipe/DeepEP、FP8 细粒度训练、128K+ Context Parallelism、万卡容错与异步 Checkpoint、Zero-Bubble 流水线、千卡 MFU 定量估算。
-   - **推理加速与引擎 (8 题)**：vLLM PagedAttention & Chunked Prefill、PD 分离与 KV 传输、MHA/GQA/MLA 矩阵吸收 & RadixAttention、Roofline 定量推导、W4A16/FP8/KV 量化、投机采样 EAGLE/MTP、DeepSeek-R1 Wide-EP & TBO、线上 SLO 排障。
+3. **32 道全栈均衡 AI Infra 题库（P6 / P7 / P8 分层，含训推 Profiling 专项）**
+   - **分布式训练 (10 题)**：3D/5D 并行、ZeRO/FSDP2、MoE EP & DualPipe/DeepEP、FP8 细粒度训练、128K+ Context Parallelism、万卡容错与异步 Checkpoint、Zero-Bubble 流水线、千卡 MFU 定量估算、**训练 Step Time Profiling 与 Straggler 定位**、**显存 Snapshot 与 OOM/碎片排查**。
+   - **推理加速与引擎 (9 题)**：vLLM PagedAttention & Chunked Prefill、PD 分离与 KV 传输、MHA/GQA/MLA 矩阵吸收 & RadixAttention、Roofline 定量推导、W4A16/FP8/KV 量化、投机采样 EAGLE/MTP、DeepSeek-R1 Wide-EP & TBO、线上 SLO 排障、**推理端到端 Profiling 与 GPU-Util 假象拆解**。
    - **RL / 后训练系统 (7 题)**：PPO vs GRPO vs DPO、Rollout 与训练的共置/分池及同步/异步更新（veRL、OpenRLHF）、Weight Sync & 3D Resharding、长 CoT Rollout 长尾 Straggler、CUDA VMM/CuMem Sleep Mode、Agentic RL 沙箱集群、Train-Inference Precision Mismatch 排障。
-   - **GPU 算子与通信 (5 题)**：FlashAttention-1/2/3、NCCL Ring/Tree & Rail-Optimized/RoCEv2、CUDA/Nsight/Triton 调优、A100→GB200 NVL72 代际演进、Chunked Linear Cross-Entropy (Liger-Kernel)。
-   - 支持自定义新建团队独家面试题。
+   - **GPU 算子与通信 (6 题)**：FlashAttention-1/2/3、NCCL Ring/Tree & Rail-Optimized/RoCEv2、CUDA/Nsight/Triton 调优、A100→GB200 NVL72 代际演进、Chunked Linear Cross-Entropy (Liger-Kernel)、**ncu SOL/Warp Stall 诊断与 nccl-tests 硬件验收**。
+   - 支持自定义新建团队独家面试题，全页面任意位置支持 **✨ 划词 AI 解释**（原理解释 / 公式推导 / 数字算例 / 转为面试追问 + 连续追问），并在核心知识点与划词弹窗中直链 **精选 YouTube 垂类图解 / 动画视频** 与一键 YouTube 图解搜索。
 
 4. **双引擎 AI 接入**
    - 零配置即用本地专家引擎；

@@ -1,7 +1,9 @@
 import { TRACKS, TARGET_LEVELS, PERSONAS } from '../data/index.js';
+import { getVideosForQuestion } from '../data/videos.js';
 import { computeRubricScore, buildFollowUpsForStates } from '../engine/evaluator.js';
 import { aiAnalyzeBoard, aiParseResume } from '../engine/llmClient.js';
 import { escapeHtml, renderMarkdown } from '../engine/markdown.js';
+import { renderVideoStrip } from './videoStrip.js';
 
 function getRecord(session, qId) {
   if (!session.records) session.records = {};
@@ -612,14 +614,20 @@ export function renderInterviewerView(container, ctx) {
 }
 
 function renderReferenceAndHintsTab(q) {
+  const videos = getVideosForQuestion(q.id);
   return `
     <div class="ref-box" style="margin-top:0;">
       <div class="ref-box-title">
         <span>Staff 级参考答案与定量公式速查</span>
-        <span class="badge badge-inference">仅面试官可见</span>
+        <div style="display:flex;gap:5px;align-items:center;">
+          <span class="badge badge-training" title="选中任意术语、公式或句子即可弹出 AI 解释">✨ 划词问 AI</span>
+          <span class="badge badge-inference">仅面试官可见</span>
+        </div>
       </div>
       <div class="msg-content">${renderMarkdown(q.referenceAnswer || '暂无参考答案')}</div>
     </div>
+
+    ${renderVideoStrip(videos)}
 
     <details open style="border:1px solid var(--border-subtle);border-radius:var(--radius-sm);padding:10px 12px;background:var(--bg-elevated);">
       <summary style="cursor:pointer;font-size:12.5px;font-weight:700;color:var(--text-primary);">渐进提示卡（候选人卡壳时口头抛出 L1→L3）</summary>
